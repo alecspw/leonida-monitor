@@ -9,6 +9,7 @@ STATE = Path(os.getenv("MONITOR_STATE_FILE", "monitor_state.json"))
 OUT = Path(os.getenv("MONITOR_REVIEWS_DIR", "reviews"))
 QUEUE = OUT / "comment_queue.json"
 BATCH_QUEUE_FILE = Path(os.getenv("MONITOR_BATCH_QUEUE_FILE", "historical_pr_batches.json"))
+BATCH_REPORT_FILE = Path(os.getenv("MONITOR_BATCH_REPORT_FILE", "historical_batch_findings.json"))
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 SOURCE = "leonida-security-monitor"
 HIGH = [
@@ -256,6 +257,7 @@ def run_historical_batch(args, state):
 
     ledger_index = load_ledger_index()
     scanned_this_run = 0
+    run_findings = []
     while cursor < len(tasks) and scanned_this_run < args.batch_limit:
         item = tasks[cursor]
         number = int(item["pr"])
@@ -341,36 +343,57 @@ def run_historical_batch(args, state):
             author = {"login": author}
         merged = bool(current.get("mergedAt"))
         pr_state = str(current.get("state") or item.get("state") or "unknown").lower()
-        additions = sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines())
-        review = {
-            "source": SOURCE, "pr": number, "head_sha": sha,
-            "reviewer": SOURCE + "/automated",
-            "date": datetime.now(timezone.utc).date().isoformat(), "created_at": now(),
-            "scope": f"high-signal static pattern scan of added diff lines; no code executed; historical batch {label}",
-            "verdict": "do-not-merge",
-            "findings": [f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}" for x in high],
-            "detailed_findings": high, "read_by_human": False, "commented_on_github": False,
-            "review_submitted": False, "publication_status": "pending_github_comment",
-            "pr_title": current.get("title", ""), "pr_url": current.get("url", ""),
-            "author": author.get("login", ""), "base_branch": current.get("baseRefName", ""),
-            "head_branch": current.get("headRefName", ""), "additions": additions,
-            "patch_fingerprint": fingerprint(diff), "pr_state": pr_state, "merged": merged,
-            "historical_batch": label
+        safe_high = []
+        for finding in high:
+            clean = dict(finding)
+            label_text = str(clean.get("pattern", "")).lower()
+            if any(word in label_text for word in ("credential", "password", "secret", "token")):
+                clean["match"] = "[evidence redacted; inspect the added line privately]"
+            safe_high.append(clean)
+        run_findings.append({
+            "pr": number,
+            "head_sha": sha,
+            "range": label,
+            "state": pr_state,
+            "merged": merged,
+            "title": current.get("title", ""),
+            "url": current.get("url", ""),
+            "author": author.get("login", ""),
+            "scope": "high-signal static pattern scan of added diff lines; no code executed",
+            "findings": safe_high
+        })
+        state.setdefault("reviewed", {})[key] = {
+            "verdict": "scan-only", "at": now(), "batch": label,
+            "high_signal_count": len(high), "medium_signal_count": len(medium)
         }
-        (OUT / f"{number}.json").write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
-        QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [number]}, indent=2) + "\n", encoding="utf-8")
-        state["batch_waiting"] = {
-            "pr": number, "head_sha": sha, "cursor": cursor, "range": label
-        }
-        save_state(state)
-        print(f"PR #{number}: high-severity signal; queued for maintainer comment.", flush=True)
-        return True
+        stats = current_batch_stats(state, label)
+        if stats:
+            stats["scanned"] = int(stats.get("scanned", 0)) + 1
+            stats["high_alerts"] = int(stats.get("high_alerts", 0)) + 1
+        cursor += 1
+        state["batch_queue_cursor"] = cursor
+        scanned_this_run += 1
+        print(
+            f"PR #{number}: {len(high)} high-signal indicator(s); saved to this run's private Actions artifact, no PR comment.",
+            flush=True
+        )
 
+    BATCH_REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BATCH_REPORT_FILE.write_text(
+        json.dumps({
+            "generated_at": now(),
+            "cursor_start": max(0, cursor - scanned_this_run),
+            "cursor_end": cursor,
+            "scanned_this_run": scanned_this_run,
+            "high_signal_prs": run_findings
+        }, indent=2) + "\n",
+        encoding="utf-8"
+    )
     state["batch_queue_cursor"] = cursor
     save_state(state)
     print(
         f"Historical batch progress: cursor {cursor}/{len(tasks)}; "
-        f"processed {scanned_this_run} PRs this run.",
+        f"processed {scanned_this_run} PRs this run; high-signal PRs {len(run_findings)}.",
         flush=True
     )
     if cursor >= len(tasks):
