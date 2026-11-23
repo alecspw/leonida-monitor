@@ -183,7 +183,8 @@ jobs:
           MONITOR_REVIEW_INDEX_FILE: ${{ github.workspace }}/leonida-reviews/docs/reviews.json
           MONITOR_BATCH_REPORT_FILE: ${{ github.workspace }}/historical_batch_findings.json
           MONITOR_BATCH_RESULTS_DIR: ${{ github.workspace }}/historical-scan-output
-          MONITOR_SITE_STATUS_FILE: ${{ github.workspace }}/leonida-reviews/docs/monitor-status.json
+          MONITOR_SITE_STATUS_FILE: ${{ github.workspace }}/monitor-status.json
+          MONITOR_SITE_STATUS_BRANCH: monitor-status
           SINCE_PR: ${{ inputs.since_pr || '8500' }}
           BATCH_RANGES: ${{ inputs.batch_ranges || '' }}
         run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR" --seed-ranges "$BATCH_RANGES" --batch-limit 100
@@ -351,9 +352,6 @@ jobs:
       - name: Commit scan records and checkpoint
         working-directory: leonida-reviews
         run: |
-          # monitor-status.json is published through the Contents API during the scan.
-          # Discard the workspace copy so it cannot race with that live file.
-          git restore --worktree --staged docs/monitor-status.json || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A reviews/ monitor_state.json historical_pr_batches.json

@@ -13,8 +13,9 @@ BATCH_REPORT_FILE = Path(os.getenv("MONITOR_BATCH_REPORT_FILE", "historical_batc
 BATCH_RESULTS_DIR = Path(os.getenv("MONITOR_BATCH_RESULTS_DIR", "historical-scan-output"))
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 LEDGER_REVIEWS_DIR = Path(os.getenv("MONITOR_LEDGER_REVIEWS_DIR", "reviews"))
-SITE_STATUS_FILE = Path(os.getenv("MONITOR_SITE_STATUS_FILE", "docs/monitor-status.json"))
+SITE_STATUS_FILE = Path(os.getenv("MONITOR_SITE_STATUS_FILE", "monitor-status.json"))
 SITE_STATUS_REPO = "Etoile-Bleu/leonida-reviews"
+SITE_STATUS_BRANCH = os.getenv("MONITOR_SITE_STATUS_BRANCH", "monitor-status")
 SITE_STATUS_INTERVAL = 45
 _LAST_SITE_STATUS_PUBLISH = 0.0
 SOURCE = "leonida-security-monitor"
@@ -298,9 +299,9 @@ def publish_site_status(state, tasks, cursor, current_pr=None, status="running",
         print("GH_TOKEN unavailable; live site status saved locally only.", flush=True)
         return
 
-    endpoint = f"repos/{SITE_STATUS_REPO}/contents/docs/monitor-status.json"
+    endpoint = f"repos/{SITE_STATUS_REPO}/contents/monitor-status.json"
     current = subprocess.run(
-        ["gh", "api", endpoint + "?ref=main"],
+        ["gh", "api", endpoint + f"?ref={SITE_STATUS_BRANCH}"],
         capture_output=True, text=True, timeout=30
     )
     sha = None
@@ -318,7 +319,7 @@ def publish_site_status(state, tasks, cursor, current_pr=None, status="running",
     request_body = {
         "message": "chore: update live automated PR scan status",
         "content": __import__("base64").b64encode(encoded_json.encode("utf-8")).decode("ascii"),
-        "branch": "main"
+        "branch": SITE_STATUS_BRANCH
     }
     if sha:
         request_body["sha"] = sha
