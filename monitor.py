@@ -100,7 +100,8 @@ def load_ledger_index():
             continue
         result[number] = {
             "head": str(row.get("head") or "").lower(),
-            "verdict": str(row.get("verdict") or "")
+            "verdict": str(row.get("verdict") or ""),
+            "automated": bool(row.get("automated"))
         }
     return result
 
@@ -120,7 +121,7 @@ def is_currently_checked(number, head_sha, state, ledger_index):
     if verdict == "not-reviewed":
         return ""
     if verdict == "in-progress":
-        return "claimed"
+        return "" if prior.get("automated") else "claimed"
     return "ledger"
 
 
