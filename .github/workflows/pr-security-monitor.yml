@@ -41,6 +41,43 @@ jobs:
         run: |
           python -m py_compile monitor.py
           python -m unittest discover -s tests -v
+      - name: Reset legacy state for reviews that were never published
+        working-directory: leonida-reviews
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          state_path = pathlib.Path("monitor_state.json")
+          reviews_dir = pathlib.Path("reviews")
+          if not state_path.exists():
+              raise SystemExit(0)
+          state = json.loads(state_path.read_text())
+          reviewed = state.setdefault("reviewed", {})
+          reset = []
+          for key in list(reviewed):
+              try:
+                  number = int(key.split(":", 1)[0])
+              except (ValueError, IndexError):
+                  continue
+              path = reviews_dir / f"{number}.json"
+              if not path.exists():
+                  reviewed.pop(key, None)
+                  reset.append(number)
+                  continue
+              try:
+                  review = json.loads(path.read_text())
+              except Exception:
+                  reviewed.pop(key, None)
+                  reset.append(number)
+                  continue
+              if review.get("source") == "leonida-security-monitor" and (
+                  review.get("commented_on_github") is not True or review.get("publication_status") != "published"
+              ):
+                  path.unlink()
+                  reviewed.pop(key, None)
+                  reset.append(number)
+          state_path.write_text(json.dumps(state, indent=2) + "\\n")
+          print("Reset stale/unpublished automated review state:", sorted(set(reset)))
+          PY
       - name: Run security monitor
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
