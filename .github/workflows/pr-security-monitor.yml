@@ -46,7 +46,7 @@ jobs:
         run: |
           python -m py_compile monitor.py
           python -m unittest discover -s tests -v
-      - name: Correct known false-positive review summaries
+      - name: Post corrections for known false-positive review summaries
         if: ${{ inputs.correct_known_false_positives }}
         working-directory: leonida-reviews
         env:
@@ -58,19 +58,19 @@ jobs:
           corrections = [
               (
                   9338,
-                  6029327301,
+                  "leonida-monitor-correction:9338:shader-terminology",
                   "**Correction — false positive**\n\nPlease disregard the previous automated note. It was triggered solely by the word shader in a descriptive comment about D3D12 texture-state masks. That is ordinary graphics terminology, not a security indicator. This finding did not identify suspicious behavior. The keyword-only terminology rule has been removed from the monitor.",
                   "False positive: ordinary graphics terminology in an explanatory comment; the keyword-only terminology rule was removed."
               ),
               (
                   9345,
-                  6029343125,
+                  "leonida-monitor-correction:9345:re-compile",
                   "**Correction — false positive**\n\nPlease disregard the previous automated Dynamic code execution note. The match was Python's re.compile(...), which compiles a regular expression and does not execute dynamic code. The detector now avoids qualified method calls such as .compile(), and a regression test covers this case.",
                   "False positive: Python re.compile() was mistaken for dynamic code execution; the detector was narrowed and a regression test added."
               ),
           ]
 
-          for number, review_id, body, note in corrections:
+          for number, marker, body, note in corrections:
               path = pathlib.Path("reviews") / f"{number}.json"
               if not path.exists():
                   raise SystemExit(f"Missing published review record: {path}")
@@ -78,22 +78,31 @@ jobs:
               if record.get("source") != "leonida-security-monitor":
                   raise SystemExit(f"Refusing to edit non-monitor record for PR #{number}")
 
-              payload = json.dumps({"body": body})
-              result = subprocess.run(
-                  ["gh", "api", "--method", "PATCH",
-                   f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews/{review_id}",
-                   "--input", "-"],
-                  input=payload, capture_output=True, text=True
+              existing = subprocess.run(
+                  ["gh", "api", "--paginate", f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews"],
+                  capture_output=True, text=True
               )
-              if result.returncode:
-                  raise SystemExit(f"Could not correct PR #{number} review: {(result.stderr or result.stdout).strip()}")
+              if existing.returncode:
+                  raise SystemExit(f"Could not check correction marker for PR #{number}: {(existing.stderr or existing.stdout).strip()}")
+              reviews = json.loads(existing.stdout)
+              already_posted = any(marker in (item.get("body") or "") for item in reviews)
+
+              if not already_posted:
+                  payload = json.dumps({"event": "COMMENT", "body": body + "\n\n<!-- " + marker + " -->"})
+                  posted = subprocess.run(
+                      ["gh", "api", "--method", "POST",
+                       f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews", "--input", "-"],
+                      input=payload, capture_output=True, text=True
+                  )
+                  if posted.returncode:
+                      raise SystemExit(f"Could not post correction for PR #{number}: {(posted.stderr or posted.stdout).strip()}")
 
               record["findings"] = []
               record["detailed_findings"] = []
               record["false_positive_corrected"] = True
               record["correction_note"] = note
               path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-              print(f"Corrected and retracted false-positive note on PR #{number}.")
+              print(f"Correction confirmed for PR #{number}; false-positive finding retracted from the ledger.")
           PY
       - name: Reset legacy state for reviews that were never published
         working-directory: leonida-reviews
