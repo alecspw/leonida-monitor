@@ -348,64 +348,37 @@ jobs:
                   removed.append(path.name)
           print("Removed unpublished legacy monitor records:", removed)
           PY
-      - name: Generate and validate GitHub Pages review data
+      - name: Commit scan records and checkpoint
         working-directory: leonida-reviews
         run: |
-          python -I build_table.py
-          python -I build_table.py --check
-      - name: Commit published reviews and generated Pages data
-        working-directory: leonida-reviews
-        run: |
+          # monitor-status.json is published through the Contents API during the scan.
+          # Discard the workspace copy so it cannot race with that live file.
+          git restore --worktree --staged docs/monitor-status.json || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A reviews/ TABLE.md docs/reviews.json docs/monitor-status.json monitor_state.json historical_pr_batches.json
+          git add -A reviews/ monitor_state.json historical_pr_batches.json
           if git diff --cached --quiet; then
-            echo "No published review changes"
-          else
-            git commit -m "chore: publish confirmed automated PR comments"
-            pushed=false
-            for attempt in 1 2 3 4; do
-              if git push origin HEAD:main; then
-                pushed=true
-                break
-              fi
+            echo "No scan records or checkpoint changes."
+            exit 0
+          fi
 
-              echo "Push raced with another update; fetching and rebasing (attempt $attempt/4)."
-              git fetch origin main
-              if ! git rebase origin/main; then
-                conflicts="$(git diff --name-only --diff-filter=U | sort)"
-                unexpected="$(printf '%s\n' "$conflicts" | grep -Ev '^(TABLE.md|docs/reviews.json|docs/monitor-status.json)$' || true)"
-                if [ -n "$unexpected" ] || [ -z "$conflicts" ]; then
-                  echo "Rebase encountered non-generated-file conflicts; refusing to overwrite them."
-                  git rebase --abort || true
-                  exit 1
-                fi
-                echo "Resolving only generated-table conflicts, then rebuilding them from merged review files."
-                while IFS= read -r path; do
-                  case "$path" in
-                    TABLE.md|docs/reviews.json|docs/monitor-status.json)
-                      git checkout --theirs -- "$path"
-                      git add "$path"
-                      ;;
-                    *)
-                      echo "Unexpected conflict path: $path"
-                      git rebase --abort || true
-                      exit 1
-                      ;;
-                  esac
-                done <<< "$conflicts"
-                GIT_EDITOR=true git rebase --continue
-              fi
-
-              python -I build_table.py
-              python -I build_table.py --check
-              git add TABLE.md docs/reviews.json
-              if ! git diff --cached --quiet; then
-                git commit -m "chore: regenerate review index after concurrent update"
-              fi
-            done
-            if [ "$pushed" != true ]; then
-              echo "Could not publish after 4 non-force push attempts."
+          git commit -m "chore: save historical PR scan checkpoint"
+          pushed=false
+          for attempt in 1 2 3 4; do
+            if git push origin HEAD:main; then
+              pushed=true
+              break
+            fi
+            echo "Concurrent ledger update; rebasing only the scan records and checkpoint (attempt $attempt/4)."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Conflict in scan records/checkpoint; aborting without auto-merging."
+              git rebase --abort || true
               exit 1
             fi
+          done
+          if [ "$pushed" != true ]; then
+            echo "Could not publish scan checkpoint after 4 non-force push attempts."
+            exit 1
           fi
+          echo "Scan records and checkpoint published. table.yml will regenerate the public index."
