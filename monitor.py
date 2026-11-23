@@ -244,6 +244,20 @@ def write_in_progress_window(tasks, cursor, batch_limit):
     end = min(len(tasks), cursor + batch_limit)
     folder = LEDGER_REVIEWS_DIR / "in-progress"
     folder.mkdir(parents=True, exist_ok=True)
+    active_numbers = {int(item["pr"]) for item in tasks[cursor:end]}
+    # Remove only our own queued markers that have moved outside the active window.
+    # Human-owned claims in the same folder are never touched.
+    for existing_path in folder.glob("*.json"):
+        try:
+            existing_record = json.loads(existing_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            existing_record.get("source") == SOURCE
+            and existing_record.get("automatic_in_progress") is True
+            and int(existing_record.get("pr", -1)) not in active_numbers
+        ):
+            existing_path.unlink()
     created = 0
     for item in tasks[cursor:end]:
         number = int(item["pr"])
