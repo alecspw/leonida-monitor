@@ -228,6 +228,7 @@ def seed_historical_batches(state, value):
             flush=True
         )
     print(f"Total queued for fresh scans: {len(tasks)}.", flush=True)
+    write_in_progress_window(tasks, 0, 100)
 
 
 def current_batch_stats(state, label):
@@ -236,6 +237,42 @@ def current_batch_stats(state, label):
         if item.get("range") == label:
             return item
     return None
+
+
+def write_in_progress_window(tasks, cursor, batch_limit):
+    end = min(len(tasks), cursor + batch_limit)
+    folder = LEDGER_REVIEWS_DIR / "in-progress"
+    folder.mkdir(parents=True, exist_ok=True)
+    created = 0
+    for item in tasks[cursor:end]:
+        number = int(item["pr"])
+        target = folder / f"{number}.json"
+        if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not (existing.get("source") == SOURCE and existing.get("automatic_in_progress") is True):
+                continue
+        record = {
+            "source": SOURCE,
+            "automatic_in_progress": True,
+            "pr": number,
+            "head_sha": item["head_sha"],
+            "reviewer": SOURCE + "/automated",
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "scope": f"queued for automatic historical diff scan ({item.get('range', 'historical')}); scan not yet complete",
+            "verdict": "in-progress",
+            "findings": [],
+            "read_by_human": False,
+            "commented_on_github": False,
+            "pr_state": item.get("state", "unknown"),
+            "merged": bool(item.get("merged")),
+            "historical_batch": item.get("range", "historical")
+        }
+        target.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        created += 1
+    print(f"Published {created} automated in-progress entries ({cursor + 1}-{end} of {len(tasks)}).", flush=True)
 
 
 def run_historical_batch(args, state):
@@ -371,7 +408,19 @@ def run_historical_batch(args, state):
         if flat_candidate.exists():
             existing_paths.append(flat_candidate)
 
-        if not existing_paths:
+        non_automatic_paths = []
+        for old_path in existing_paths:
+            try:
+                old_record = json.loads(old_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                non_automatic_paths.append(old_path)
+                continue
+            if old_record.get("source") == SOURCE and old_record.get("automatic_in_progress") is True:
+                old_path.unlink()
+            else:
+                non_automatic_paths.append(old_path)
+
+        if not non_automatic_paths:
             scan_only_dir = LEDGER_REVIEWS_DIR / "scan-only"
             scan_only_dir.mkdir(parents=True, exist_ok=True)
             (scan_only_dir / f"{number}.json").write_text(
@@ -426,6 +475,7 @@ def run_historical_batch(args, state):
         encoding="utf-8"
     )
     state["batch_queue_cursor"] = cursor
+    write_in_progress_window(tasks, cursor, args.batch_limit)
     save_state(state)
     print(
         f"Historical batch progress: cursor {cursor}/{len(tasks)}; "
@@ -585,6 +635,7 @@ def main():
     try:
         if args.seed_ranges:
             seed_historical_batches(state, args.seed_ranges)
+            return 0
         if run_historical_batch(args, state):
             return 0
         prs = get_prs(args.limit)
