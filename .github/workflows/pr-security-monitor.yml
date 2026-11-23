@@ -2,7 +2,7 @@ name: Leonida PR Security Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes (GitHub Actions minimum)
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       since_pr:
@@ -14,115 +14,99 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: leonida-pr-security-monitor
+  cancel-in-progress: false
+
 jobs:
   security-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Checkout leonida-reviews (for schema/validation)
+      - name: Checkout monitor repository
+        uses: actions/checkout@v4
+
+      - name: Checkout review repository
         uses: actions/checkout@v4
         with:
           repository: Etoile-Bleu/leonida-reviews
+          ref: main
           path: leonida-reviews
+          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install GitHub CLI
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update && sudo apt install -y gh
-
-      - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GH_TOKEN }}" | gh auth login --with-token
-
-      - name: Download monitor script
-        run: |
-          curl -fsSL -o monitor.py https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/monitor.py
-
-      - name: Run Security Monitor
+      - name: Run security monitor
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          MONITOR_STATE_FILE: ${{ github.workspace }}/leonida-reviews/monitor_state.json
+          MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
+          SINCE_PR: ${{ inputs.since_pr || '8500' }}
         run: |
-          python monitor.py --once --limit 100 --since-pr ${{ github.event.inputs.since_pr || '8500' }}
+          python -m py_compile monitor.py
+          python monitor.py --once --limit 100 --since-pr "$SINCE_PR"
 
-      - name: Push reviews to leonida-reviews repo
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: Copy reviews and regenerate index
         run: |
+          mkdir -p leonida-reviews/reviews
+          if compgen -G 'reviews/*.json' > /dev/null; then
+            cp -f reviews/*.json leonida-reviews/reviews/
+          fi
           cd leonida-reviews
+          python -I build_table.py
+          python -I build_table.py --check
+
+      - name: Comment once on newly reviewed PRs
+        working-directory: leonida-reviews
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+
+          for path in sorted(pathlib.Path('reviews').glob('*.json')):
+              review = json.loads(path.read_text(encoding='utf-8'))
+              pr = review.get('pr')
+              if not pr or review.get('commented_on_github', False):
+                  continue
+              verdict = review.get('verdict', 'not-reviewed')
+              emoji = {'do-not-merge': '🚨', 'notes': '⚠️', 'clean': '✅'}.get(verdict, 'ℹ️')
+              findings = review.get('findings') or ['No findings.']
+              body = (
+                  f"{emoji} **Automated security review: {verdict.upper()}** "
+                  f"(commit `{str(review.get('head_sha', ''))[:8]}`)\n\n"
+                  + '\n'.join(f'- {item}' for item in findings)
+                  + '\n\n_Scope: static analysis of added diff lines only; no code was executed. '
+                    'Please review findings manually._'
+              )
+              result = subprocess.run(
+                  ['gh', 'api', '--method', 'POST',
+                   f'repos/ItsNotRexed/Leonida/issues/{pr}/comments',
+                   '-f', f'body={body}'], capture_output=True, text=True
+              )
+              if result.returncode == 0:
+                  review['commented_on_github'] = True
+                  path.write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
+                  print(f'Commented on PR #{pr}')
+              else:
+                  print(f'Comment failed for PR #{pr}: {result.stderr.strip()}')
+          PY
+
+      - name: Commit reviews, state, and generated table
+        working-directory: leonida-reviews
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Copy new reviews from monitor output
-          cp -r ../reviews/* reviews/ 2>/dev/null || true
-          
-          # Check if there are new/changed reviews
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "No new reviews to commit"
+          git add reviews/ TABLE.md monitor_state.json
+          if git diff --cached --quiet; then
+            echo "No review repository changes to commit"
           else
-            git add reviews/
-            git commit -m "chore: add security reviews from $(date -u +%Y-%m-%d)"
-            git push
-            echo "Pushed reviews to leonida-reviews"
+            git commit -m "chore: update automated PR security reviews"
+            git push origin HEAD:main
           fi
-          
-          # Rebuild TABLE.md
-          python -I build_table.py --check
-          git add TABLE.md
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update TABLE.md $(date -u +%Y-%m-%d)"
-            git push
-            echo "Updated TABLE.md"
-          fi
-
-      - name: Comment on analyzed PRs
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          # Find PRs with findings and comment on them
-          for review_file in ../reviews/*.json; do
-            [ -f "$review_file" ] || continue
-            
-            pr_num=$(jq -r '.pr' "$review_file")
-            verdict=$(jq -r '.verdict' "$review_file")
-            findings=$(jq -r '.findings | join("\n")' "$review_file")
-            head_sha=$(jq -r '.head_sha' "$review_file")
-            
-            [ "$pr_num" = "null" ] && continue
-            
-            # Create comment body
-            if [ "$verdict" = "do-not-merge" ]; then
-              emoji="🚨"
-              status="**DO NOT MERGE**"
-            elif [ "$verdict" = "notes" ]; then
-              emoji="⚠️"
-              status="**NOTES**"
-            elif [ "$verdict" = "clean" ]; then
-              emoji="✅"
-              status="**CLEAN**"
-            else
-              emoji="ℹ️"
-              status="$verdict"
-            fi
-            
-            comment_body="${emoji} **Security Review: $status** (commit \`${head_sha:0:8}\`)
-
-<details>
-<summary>Findings</summary>
-
-$(echo "$findings" | sed 's/^/- /' || echo "None")
-
-</details>
-
-_Scope: static analysis, diff only, nothing executed_
-_Findings come from automated security review of this PR's diff; read by the account owner._"
-            
-            # Post comment
-            gh api repos/ItsNotRexed/Leonida/issues/$pr_num/comments \
-              -f body="$comment_body" \
-              -H "Accept: application/vnd.github+json" 2>/dev/null || echo "Failed to comment on PR #$pr_num"
-          done
