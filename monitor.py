@@ -166,38 +166,35 @@ def main():
     state.setdefault("pending", [])
     seed_historical_signatures(state)
 
-    while True:
-        try:
-            prs = get_prs(args.limit)
-            dupes = duplicate_checks(prs)
-            by_number = {p["number"]: p for p in prs}
+    try:
+        prs = get_prs(args.limit)
+        dupes = duplicate_checks(prs)
+        by_number = {p["number"]: p for p in prs}
 
-            pending = []
-            for item in state["pending"]:
-                if not isinstance(item, dict) or not item.get("pr") or not item.get("head_sha"):
-                    continue
-                live = by_number.get(item["pr"])
-                if live and live.get("headRefOid", "") == item["head_sha"]:
-                    pending.append(item)
-            pending_keys = {(x["pr"], x["head_sha"]) for x in pending}
+        pending = []
+        for item in state["pending"]:
+            if not isinstance(item, dict) or not item.get("pr") or not item.get("head_sha"):
+                continue
+            live = by_number.get(item["pr"])
+            if live and live.get("headRefOid", "") == item["head_sha"]:
+                pending.append(item)
+        pending_keys = {(x["pr"], x["head_sha"]) for x in pending}
 
-            for p in sorted(prs, key=lambda x: x["number"]):
-                n, sha = p["number"], p.get("headRefOid", "")
-                key = f"{n}:{sha}"
-                if n > args.since_pr and (n, sha) not in pending_keys and key not in state["reviewed"]:
-                    pending.append({"pr": n, "head_sha": sha})
-                    pending_keys.add((n, sha))
+        for p in sorted(prs, key=lambda x: x["number"]):
+            n, sha = p["number"], p.get("headRefOid", "")
+            key = f"{n}:{sha}"
+            if n > args.since_pr and (n, sha) not in pending_keys and key not in state["reviewed"]:
+                pending.append({"pr": n, "head_sha": sha})
+                pending_keys.add((n, sha))
 
-            # A single PR per invocation means retries never skip over an unposted finding.
-            if not pending:
-                QUEUE.write_text(json.dumps({"source": SOURCE, "prs": []}, indent=2) + "\n")
-                STATE.write_text(json.dumps(state, indent=2) + "\n")
-                print("No pending PRs.", flush=True)
-                return 0
-
+        print(f"Fetched {len(prs)} open PRs; pending {len(pending)}.", flush=True)
+        # Consume clean scans in the same run. Stop at the first actionable finding so the
+        # workflow can post exactly one COMMENT and preserve fair, ordered retries.
+        while pending:
             item = pending[0]
             p = by_number[item["pr"]]
             n, sha = p["number"], item["head_sha"]
+            key = f"{n}:{sha}"
             print(f"Analyzing PR #{n}: {p.get('title', '')}", flush=True)
             diff = gh(["pr", "diff", str(n), "--repo", REPO])
             findings = learn_from_previous(scan(diff) + dupes.get(n, []), state, n)
@@ -212,62 +209,49 @@ def main():
 
             high = [x for x in findings if x["severity"] == "high"]
             verdict = "do-not-merge" if high else ("notes" if findings else "clean")
-            key = f"{n}:{sha}"
-
-            # A clean heuristic scan is not an approval and is not sent as an empty GitHub review.
             if verdict == "clean":
                 state["reviewed"][key] = {"verdict": "scan-only", "at": now()}
-                state["pending"] = pending[1:]
-                STATE.write_text(json.dumps(state, indent=2) + "\n")
-                QUEUE.write_text(json.dumps({"source": SOURCE, "prs": []}, indent=2) + "\n")
-                print(f"PR #{n}: scan-only; no GitHub review will be posted.", flush=True)
-                return 0
+                pending.pop(0)
+                state["pending"] = pending
+                STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+                print(f"PR #{n}: scan-only; no approval or public comment.", flush=True)
+                continue
 
             additions = sum(x.startswith("+") and not x.startswith("+++") for x in diff.splitlines())
             review = {
-                "source": SOURCE,
-                "pr": n,
-                "head_sha": sha,
-                "reviewer": SOURCE + "/automated",
-                "date": datetime.now(timezone.utc).date().isoformat(),
-                "created_at": now(),
+                "source": SOURCE, "pr": n, "head_sha": sha, "reviewer": SOURCE + "/automated",
+                "date": datetime.now(timezone.utc).date().isoformat(), "created_at": now(),
                 "scope": "heuristic static analysis of added diff lines and open-PR metadata; no code executed",
                 "verdict": verdict,
-                "findings": [
-                    f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}"
-                    for x in findings
-                ],
-                "detailed_findings": findings,
-                "read_by_human": False,
-                "commented_on_github": False,
-                "review_submitted": False,
-                "publication_status": "pending_github_comment",
-                "pr_title": p.get("title", ""),
-                "pr_url": p.get("url", ""),
+                "findings": [f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}" for x in findings],
+                "detailed_findings": findings, "read_by_human": False, "commented_on_github": False,
+                "review_submitted": False, "publication_status": "pending_github_comment",
+                "pr_title": p.get("title", ""), "pr_url": p.get("url", ""),
                 "author": (p.get("author") or {}).get("login", ""),
-                "base_branch": p.get("baseRefName", ""),
-                "head_branch": p.get("headRefName", ""),
-                "additions": additions,
-                "patch_fingerprint": fingerprint(diff)
+                "base_branch": p.get("baseRefName", ""), "head_branch": p.get("headRefName", ""),
+                "additions": additions, "patch_fingerprint": fingerprint(diff)
             }
-
-            # This JSON exists only in the workflow workspace until the GitHub comment succeeds.
-            dest = OUT / f"{n}.json"
-            dest.write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
+            (OUT / f"{n}.json").write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
             state["pending"] = pending
-            STATE.write_text(json.dumps(state, indent=2) + "\n")
-            QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [n]}, indent=2) + "\n")
-            print(f"PR #{n}: {verdict}; queued for a GitHub COMMENT. It will not be published until posted.", flush=True)
+            STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+            QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [n]}, indent=2) + "\n", encoding="utf-8")
+            print(f"PR #{n}: {verdict}; queued for a GitHub COMMENT. Not public until posted.", flush=True)
             return 0
 
-        except RateLimited as exc:
-            print(f"RATE LIMITED: pending PR preserved for the next scheduled run: {exc}", flush=True)
-            STATE.write_text(json.dumps(state, indent=2) + "\n")
-            return 0
-        except Exception as exc:
-            print(f"ERROR: {exc}", flush=True)
-            STATE.write_text(json.dumps(state, indent=2) + "\n")
-            return 1
+        state["pending"] = []
+        STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        QUEUE.write_text(json.dumps({"source": SOURCE, "prs": []}, indent=2) + "\n", encoding="utf-8")
+        print("No actionable findings in the current PR batch.", flush=True)
+        return 0
+
+    except RateLimited as exc:
+        print(f"RATE LIMITED; pending PR state preserved for the next scheduled run: {exc}", flush=True)
+        STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", flush=True)
+        STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())
