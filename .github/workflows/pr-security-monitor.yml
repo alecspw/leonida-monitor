@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: \${{ secrets.GH_TOKEN }}
           MONITOR_STATE_FILE: \${{ github.workspace }}/leonida-reviews/monitor_state.json
           MONITOR_REVIEWS_DIR: \${{ github.workspace }}/reviews
-          SINCE_PR: \${{ inputs.since_pr || '8500' }}
+          SINCE_PR: ${{ inputs.since_pr || '8500' }}
         run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
       - name: Copy reviews and regenerate index
         run: |
