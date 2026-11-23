@@ -176,7 +176,7 @@ def main():
                 review={"source":SOURCE,"pr":n,"head_sha":sha,"reviewer":SOURCE+"/automated","date":datetime.now(timezone.utc).date().isoformat(),"created_at":now(),
                   "scope":"heuristic static analysis of added diff lines and open-PR metadata; no code executed","verdict":verdict,
                   "findings":[f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}" for x in findings],
-                  "detailed_findings":findings,"read_by_human":False,"commented_on_github":False,
+                  "detailed_findings":findings,"read_by_human":False,"commented_on_github":False,"review_submitted":False,
                   "pr_title":p.get("title",""),"pr_url":p.get("url",""),"author":(p.get("author") or {}).get("login",""),
                   "base_branch":p.get("baseRefName",""),"head_branch":p.get("headRefName",""),
                   "additions":additions,"patch_fingerprint":fingerprint(diff)}
@@ -185,11 +185,11 @@ def main():
                     try:
                         old=json.loads(dest.read_text())
                         if old.get("head_sha")==sha:
-                            review["read_by_human"]=old.get("read_by_human",False); review["commented_on_github"]=old.get("commented_on_github",False)
+                            review["read_by_human"]=old.get("read_by_human",False); review["commented_on_github"]=old.get("commented_on_github",False); review["review_submitted"]=old.get("review_submitted",False)
                     except Exception: pass
                 dest.write_text(json.dumps(review,indent=2)+"\n")
                 state["reviewed"][f"{n}:{sha}"]={"verdict":verdict,"at":now()}
-                if verdict!="clean": queue.append(n)
+                queue.append(n)
                 if high:
                     print(f"\n🚨 MALICIOUS-CODE ALERT — PR #{n}: {len(high)} high-severity indicator(s)",flush=True)
                     for x in high: print(f"  {x['file']}:{x['line']} {x['pattern']} — {x['match']}",flush=True)
