@@ -9,6 +9,11 @@ on:
         description: 'Only check PRs after this number'
         required: false
         type: string
+      correct_known_false_positives:
+        description: 'Correct two known false-positive review summaries on Leonida'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +46,55 @@ jobs:
         run: |
           python -m py_compile monitor.py
           python -m unittest discover -s tests -v
+      - name: Correct known false-positive review summaries
+        if: ${{ inputs.correct_known_false_positives }}
+        working-directory: leonida-reviews
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, pathlib, subprocess
+
+          corrections = [
+              (
+                  9338,
+                  6029327301,
+                  "**Correction — false positive**\n\nPlease disregard the previous automated note. It was triggered solely by the word shader in a descriptive comment about D3D12 texture-state masks. That is ordinary graphics terminology, not a security indicator. This finding did not identify suspicious behavior. The keyword-only terminology rule has been removed from the monitor.",
+                  "False positive: ordinary graphics terminology in an explanatory comment; the keyword-only terminology rule was removed."
+              ),
+              (
+                  9345,
+                  6029343125,
+                  "**Correction — false positive**\n\nPlease disregard the previous automated Dynamic code execution note. The match was Python's re.compile(...), which compiles a regular expression and does not execute dynamic code. The detector now avoids qualified method calls such as .compile(), and a regression test covers this case.",
+                  "False positive: Python re.compile() was mistaken for dynamic code execution; the detector was narrowed and a regression test added."
+              ),
+          ]
+
+          for number, review_id, body, note in corrections:
+              path = pathlib.Path("reviews") / f"{number}.json"
+              if not path.exists():
+                  raise SystemExit(f"Missing published review record: {path}")
+              record = json.loads(path.read_text(encoding="utf-8"))
+              if record.get("source") != "leonida-security-monitor":
+                  raise SystemExit(f"Refusing to edit non-monitor record for PR #{number}")
+
+              payload = json.dumps({"body": body})
+              result = subprocess.run(
+                  ["gh", "api", "--method", "PATCH",
+                   f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews/{review_id}",
+                   "--input", "-"],
+                  input=payload, capture_output=True, text=True
+              )
+              if result.returncode:
+                  raise SystemExit(f"Could not correct PR #{number} review: {(result.stderr or result.stdout).strip()}")
+
+              record["findings"] = []
+              record["detailed_findings"] = []
+              record["false_positive_corrected"] = True
+              record["correction_note"] = note
+              path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+              print(f"Corrected and retracted false-positive note on PR #{number}.")
+          PY
       - name: Reset legacy state for reviews that were never published
         working-directory: leonida-reviews
         run: |
