@@ -10,6 +10,7 @@ OUT = Path(os.getenv("MONITOR_REVIEWS_DIR", "reviews"))
 QUEUE = OUT / "comment_queue.json"
 BATCH_QUEUE_FILE = Path(os.getenv("MONITOR_BATCH_QUEUE_FILE", "historical_pr_batches.json"))
 BATCH_REPORT_FILE = Path(os.getenv("MONITOR_BATCH_REPORT_FILE", "historical_batch_findings.json"))
+BATCH_RESULTS_DIR = Path(os.getenv("MONITOR_BATCH_RESULTS_DIR", "historical-scan-output"))
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 SOURCE = "leonida-security-monitor"
 HIGH = [
@@ -273,18 +274,9 @@ def run_historical_batch(args, state):
         except RateLimited:
             raise
         except Exception as exc:
-            state.setdefault("historical_batch", {}).setdefault("lookup_errors", 0)
-            state["historical_batch"]["lookup_errors"] += 1
-            state.setdefault("reviewed", {})[f"{number}:{planned_sha}"] = {
-                "verdict": "not-reviewed", "at": now(), "batch": label,
-                "reason": f"Could not retrieve PR metadata: {str(exc)[:160]}"
-            }
-            cursor += 1
-            state["batch_queue_cursor"] = cursor
-            scanned_this_run += 1
-            save_state(state)
-            print(f"PR #{number}: not-reviewed; metadata unavailable.", flush=True)
-            continue
+            raise RuntimeError(
+                f"PR #{number}: metadata unavailable; leaving this item queued for retry: {str(exc)[:300]}"
+            ) from exc
 
         sha = str(current.get("headRefOid") or planned_sha)
         key = f"{number}:{sha}"
@@ -302,55 +294,29 @@ def run_historical_batch(args, state):
         except RateLimited:
             raise
         except Exception as exc:
-            state.setdefault("reviewed", {})[key] = {
-                "verdict": "not-reviewed", "at": now(), "batch": label,
-                "reason": f"Could not retrieve PR diff: {str(exc)[:160]}"
-            }
-            cursor += 1
-            state["batch_queue_cursor"] = cursor
-            scanned_this_run += 1
-            save_state(state)
-            print(f"PR #{number}: not-reviewed; diff unavailable.", flush=True)
-            continue
+            raise RuntimeError(
+                f"PR #{number}: diff unavailable; leaving this item queued for retry: {str(exc)[:300]}"
+            ) from exc
 
         findings = scan(diff)
         high = [finding for finding in findings if finding.get("severity") == "high"]
         medium = [finding for finding in findings if finding.get("severity") == "medium"]
-        if not high:
-            state.setdefault("reviewed", {})[key] = {
-                "verdict": "scan-only", "at": now(), "batch": label,
-                "medium_signal_count": len(medium)
-            }
-            stats = current_batch_stats(state, label)
-            if stats:
-                stats["scanned"] = int(stats.get("scanned", 0)) + 1
-                if medium:
-                    stats["medium_signal_prs"] = int(stats.get("medium_signal_prs", 0)) + 1
-            cursor += 1
-            state["batch_queue_cursor"] = cursor
-            scanned_this_run += 1
-            if scanned_this_run % 10 == 0:
-                save_state(state)
-            print(
-                f"PR #{number}: scan-only; {len(high)} high-severity indicators, "
-                f"{len(medium)} medium heuristic signals; no public comment.",
-                flush=True
-            )
-            continue
-
+        provisional = "do-not-merge" if high else ("notes" if medium else "clean")
         author = current.get("author") or {}
         if isinstance(author, str):
             author = {"login": author}
         merged = bool(current.get("mergedAt"))
         pr_state = str(current.get("state") or item.get("state") or "unknown").lower()
-        safe_high = []
-        for finding in high:
+
+        safe_findings = []
+        for finding in findings:
             clean = dict(finding)
             label_text = str(clean.get("pattern", "")).lower()
             if any(word in label_text for word in ("credential", "password", "secret", "token")):
                 clean["match"] = "[evidence redacted; inspect the added line privately]"
-            safe_high.append(clean)
-        run_findings.append({
+            safe_findings.append(clean)
+
+        result = {
             "pr": number,
             "head_sha": sha,
             "range": label,
@@ -359,22 +325,70 @@ def run_historical_batch(args, state):
             "title": current.get("title", ""),
             "url": current.get("url", ""),
             "author": author.get("login", ""),
-            "scope": "high-signal static pattern scan of added diff lines; no code executed",
-            "findings": safe_high
-        })
+            "provisional_verdict": provisional,
+            "scope": "historical static pattern scan of added diff lines; no code executed; not a full review",
+            "findings": safe_findings
+        }
+        category_dir = BATCH_RESULTS_DIR / provisional
+        category_dir.mkdir(parents=True, exist_ok=True)
+        (category_dir / f"{number}.json").write_text(
+            json.dumps(result, indent=2) + "\n", encoding="utf-8"
+        )
+        if high or medium:
+            run_findings.append(result)
+
+        # Every historical pass is explicitly recorded as scan-only in the matching
+        # verdict folder; detailed heuristic matches remain in the per-run artifact.
+        record = {
+            "source": SOURCE,
+            "pr": number,
+            "head_sha": sha,
+            "reviewer": SOURCE + "/automated",
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "scope": f"historical {label} static scan; no code executed; heuristic only, not a full review",
+            "verdict": "scan-only",
+            "findings": [],
+            "read_by_human": False,
+            "commented_on_github": False,
+            "provisional_verdict": provisional,
+            "heuristic_signal_counts": {"high": len(high), "medium": len(medium)},
+            "pr_title": current.get("title", ""),
+            "author": author.get("login", ""),
+            "pr_url": current.get("url", ""),
+            "pr_state": pr_state,
+            "merged": merged,
+            "historical_batch": label,
+            "historical_scan_at": now()
+        }
+        scan_only_dir = OUT / "scan-only"
+        scan_only_dir.mkdir(parents=True, exist_ok=True)
+        (scan_only_dir / f"{number}.json").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8"
+        )
+
         state.setdefault("reviewed", {})[key] = {
-            "verdict": "scan-only", "at": now(), "batch": label,
-            "high_signal_count": len(high), "medium_signal_count": len(medium)
+            "verdict": "scan-only",
+            "at": now(),
+            "batch": label,
+            "provisional_verdict": provisional,
+            "high_signal_count": len(high),
+            "medium_signal_count": len(medium)
         }
         stats = current_batch_stats(state, label)
         if stats:
             stats["scanned"] = int(stats.get("scanned", 0)) + 1
-            stats["high_alerts"] = int(stats.get("high_alerts", 0)) + 1
+            if high:
+                stats["high_alerts"] = int(stats.get("high_alerts", 0)) + 1
+            elif medium:
+                stats["medium_signal_prs"] = int(stats.get("medium_signal_prs", 0)) + 1
         cursor += 1
         state["batch_queue_cursor"] = cursor
         scanned_this_run += 1
+        if scanned_this_run % 10 == 0:
+            save_state(state)
         print(
-            f"PR #{number}: {len(high)} high-signal indicator(s); saved to this run's private Actions artifact, no PR comment.",
+            f"PR #{number}: {provisional}; stored in reviews/scan-only; "
+            f"{len(high)} high and {len(medium)} medium heuristic signal(s).",
             flush=True
         )
 
@@ -385,7 +399,11 @@ def run_historical_batch(args, state):
             "cursor_start": max(0, cursor - scanned_this_run),
             "cursor_end": cursor,
             "scanned_this_run": scanned_this_run,
-            "high_signal_prs": run_findings
+            "high_signal_prs": run_findings,
+            "by_verdict": {
+                verdict: [item for item in run_findings if item.get("provisional_verdict") == verdict]
+                for verdict in ("do-not-merge", "notes", "clean")
+            }
         }, indent=2) + "\n",
         encoding="utf-8"
     )
