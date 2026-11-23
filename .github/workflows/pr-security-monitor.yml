@@ -1,0 +1,76 @@
+name: Leonida PR Security Monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes
+  workflow_dispatch:
+    inputs:
+      since_pr:
+        description: 'Only check PRs after this number'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  security-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout leonida-reviews (for schema/validation)
+        uses: actions/checkout@v4
+        with:
+          repository: Etoile-Bleu/leonida-reviews
+          path: leonida-reviews
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update && sudo apt install -y gh
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Download monitor script
+        run: |
+          curl -fsSL -o monitor.py https://raw.githubusercontent.com/${{ github.repository }}/main/monitor.py
+
+      - name: Run Security Monitor
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python monitor.py --once --limit 100 --since-pr 8500
+
+      - name: Upload review artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-security-reviews
+          path: reviews/
+          retention-days: 30
+
+      - name: Validate reviews
+        run: |
+          cd leonida-reviews
+          python -I build_table.py --check
+
+      - name: Upload TABLE.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-table
+          path: leonida-reviews/TABLE.md
+          retention-days: 30
+
+      - name: Comment on suspicious PRs
+        if: always()
+        run: |
+          # This would be implemented to post comments on PRs with findings
+          # For now, just log
+          echo "Review complete. Check artifacts for details."
