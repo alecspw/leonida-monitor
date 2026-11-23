@@ -8,6 +8,8 @@ REPO = "ItsNotRexed/Leonida"
 STATE = Path(os.getenv("MONITOR_STATE_FILE", "monitor_state.json"))
 OUT = Path(os.getenv("MONITOR_REVIEWS_DIR", "reviews"))
 QUEUE = OUT / "comment_queue.json"
+BATCH_QUEUE_FILE = Path(os.getenv("MONITOR_BATCH_QUEUE_FILE", "historical_pr_batches.json"))
+LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 SOURCE = "leonida-security-monitor"
 HIGH = [
  (r"\b(?:VirtualAllocEx|WriteProcessMemory|CreateRemoteThread|NtUnmapViewOfSection)\b", "Process injection"),
@@ -45,7 +47,7 @@ class RateLimited(Exception): pass
 
 def now(): return datetime.now(timezone.utc).isoformat()
 
-def gh(args, timeout=45):
+def gh(args, timeout=600):
     for attempt in range(4):
         p = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         if p.returncode == 0: return p.stdout
@@ -61,6 +63,323 @@ def gh(args, timeout=45):
 def get_prs(limit):
     return json.loads(gh(["pr","list","--repo",REPO,"--state","open","--limit",str(limit),
       "--json","number,title,body,author,headRefOid,baseRefName,headRefName,url"]))
+
+def parse_pr_ranges(value):
+    ranges = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        if not match:
+            raise ValueError(f"Invalid PR range {part!r}; expected START-END.")
+        start, end = map(int, match.groups())
+        if start < 1 or end < start:
+            raise ValueError(f"Invalid PR range {part!r}.")
+        ranges.append((start, end))
+    if not ranges:
+        raise ValueError("No PR ranges supplied.")
+    return ranges
+
+
+def load_ledger_index():
+    if not LEDGER_INDEX_FILE.exists():
+        return {}
+    try:
+        rows = json.loads(LEDGER_INDEX_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Could not read review ledger index {LEDGER_INDEX_FILE}: {exc}") from exc
+    result = {}
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            number = int(row.get("pr"))
+        except (TypeError, ValueError):
+            continue
+        result[number] = {
+            "head": str(row.get("head") or "").lower(),
+            "verdict": str(row.get("verdict") or "")
+        }
+    return result
+
+
+def is_currently_checked(number, head_sha, state, ledger_index):
+    key = f"{number}:{head_sha}"
+    if key in state.get("reviewed", {}):
+        return "state"
+    prior = ledger_index.get(number)
+    if not prior:
+        return ""
+    prefix = prior.get("head", "")
+    if len(prefix) < 7 or not head_sha.lower().startswith(prefix):
+        return ""
+    verdict = prior.get("verdict", "")
+    if verdict == "not-reviewed":
+        return ""
+    if verdict == "in-progress":
+        return "claimed"
+    return "ledger"
+
+
+def get_all_prs():
+    projection = (
+        ".[] | {number: .number, title: (.title // \"\"), "
+        "author: {login: (.user.login // \"\")}, "
+        "headRefOid: (.head.sha // \"\"), baseRefName: (.base.ref // \"\"), "
+        "headRefName: (.head.ref // \"\"), url: (.html_url // \"\"), "
+        "state: (.state // \"unknown\"), merged_at: .merged_at} | @json"
+    )
+    raw = gh(["api", "--paginate", "--jq", projection,
+              f"repos/{REPO}/pulls?state=all&per_page=100"], timeout=900)
+    prs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+            if isinstance(item, str):
+                item = json.loads(item)
+            if isinstance(item, dict) and item.get("number"):
+                prs.append(item)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Could not parse paginated PR inventory row: {exc}") from exc
+    return prs
+
+
+def save_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def seed_historical_batches(state, value):
+    if BATCH_QUEUE_FILE.exists():
+        raise RuntimeError(
+            f"Historical batch queue already exists at {BATCH_QUEUE_FILE}; refusing to reseed it."
+        )
+    ranges = parse_pr_ranges(value)
+    all_prs = get_all_prs()
+    ledger_index = load_ledger_index()
+    state.setdefault("reviewed", {})
+    tasks = []
+    summaries = []
+
+    for start, end in ranges:
+        label = f"{start}-{end}"
+        selected = [p for p in all_prs if start <= int(p.get("number", 0)) <= end]
+        selected.sort(key=lambda p: int(p["number"]))
+        stats = {
+            "range": label,
+            "total_prs": len(selected),
+            "already_checked": 0,
+            "active_claims": 0,
+            "queued": 0,
+            "missing_head": 0,
+            "scanned": 0,
+            "high_alerts": 0,
+            "medium_signal_prs": 0
+        }
+        for p in selected:
+            number = int(p["number"])
+            sha = str(p.get("headRefOid") or "")
+            if not sha:
+                stats["missing_head"] += 1
+                continue
+            checked = is_currently_checked(number, sha, state, ledger_index)
+            if checked == "claimed":
+                stats["active_claims"] += 1
+                continue
+            if checked:
+                stats["already_checked"] += 1
+                continue
+            tasks.append({
+                "pr": number,
+                "head_sha": sha,
+                "range": label,
+                "state": p.get("state", "unknown"),
+                "merged": bool(p.get("merged_at"))
+            })
+            stats["queued"] += 1
+        summaries.append(stats)
+
+    BATCH_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BATCH_QUEUE_FILE.write_text(
+        json.dumps({"schema": 1, "ranges": summaries, "tasks": tasks}, separators=(",", ":")) + "\n",
+        encoding="utf-8"
+    )
+    state["historical_batch"] = {
+        "ranges": summaries,
+        "total_tasks": len(tasks),
+        "seeded_at": now(),
+        "queue_file": str(BATCH_QUEUE_FILE)
+    }
+    state["batch_queue_cursor"] = 0
+    state.pop("batch_waiting", None)
+    save_state(state)
+
+    print(f"Historical PR inventory fetched: {len(all_prs)} PRs across all states.", flush=True)
+    for stats in summaries:
+        print(
+            "Batch #{range}: {total_prs} PRs; {already_checked} already checked; "
+            "{active_claims} active claims deferred; {queued} queued; {missing_head} missing head SHA.".format(**stats),
+            flush=True
+        )
+    print(f"Total queued for fresh scans: {len(tasks)}.", flush=True)
+
+
+def current_batch_stats(state, label):
+    batch = state.get("historical_batch", {})
+    for item in batch.get("ranges", []):
+        if item.get("range") == label:
+            return item
+    return None
+
+
+def run_historical_batch(args, state):
+    if not BATCH_QUEUE_FILE.exists():
+        return False
+    try:
+        data = json.loads(BATCH_QUEUE_FILE.read_text(encoding="utf-8"))
+        tasks = data.get("tasks", [])
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Could not read historical batch queue: {exc}") from exc
+    if not isinstance(tasks, list):
+        raise RuntimeError("Historical batch queue has an invalid tasks list.")
+
+    cursor = int(state.get("batch_queue_cursor", 0))
+    if cursor >= len(tasks):
+        batch = state.setdefault("historical_batch", {})
+        if not batch.get("completed_at"):
+            batch["completed_at"] = now()
+            save_state(state)
+        print(f"Historical batch queue complete: {len(tasks)} queued PRs processed.", flush=True)
+        return False
+
+    ledger_index = load_ledger_index()
+    scanned_this_run = 0
+    while cursor < len(tasks) and scanned_this_run < args.batch_limit:
+        item = tasks[cursor]
+        number = int(item["pr"])
+        label = str(item.get("range") or "historical")
+        planned_sha = str(item.get("head_sha") or "")
+        print(f"Historical batch {label}: checking PR #{number} ({cursor + 1}/{len(tasks)}).", flush=True)
+
+        try:
+            current = json.loads(gh([
+                "pr", "view", str(number), "--repo", REPO, "--json",
+                "title,body,author,headRefOid,baseRefName,headRefName,url,state,mergedAt"
+            ]))
+        except RateLimited:
+            raise
+        except Exception as exc:
+            state.setdefault("historical_batch", {}).setdefault("lookup_errors", 0)
+            state["historical_batch"]["lookup_errors"] += 1
+            state.setdefault("reviewed", {})[f"{number}:{planned_sha}"] = {
+                "verdict": "not-reviewed", "at": now(), "batch": label,
+                "reason": f"Could not retrieve PR metadata: {str(exc)[:160]}"
+            }
+            cursor += 1
+            state["batch_queue_cursor"] = cursor
+            scanned_this_run += 1
+            save_state(state)
+            print(f"PR #{number}: not-reviewed; metadata unavailable.", flush=True)
+            continue
+
+        sha = str(current.get("headRefOid") or planned_sha)
+        key = f"{number}:{sha}"
+        checked = is_currently_checked(number, sha, state, ledger_index)
+        if checked:
+            cursor += 1
+            state["batch_queue_cursor"] = cursor
+            scanned_this_run += 1
+            save_state(state)
+            print(f"PR #{number}: skipped; current head already has a {checked} review.", flush=True)
+            continue
+
+        try:
+            diff = gh(["pr", "diff", str(number), "--repo", REPO])
+        except RateLimited:
+            raise
+        except Exception as exc:
+            state.setdefault("reviewed", {})[key] = {
+                "verdict": "not-reviewed", "at": now(), "batch": label,
+                "reason": f"Could not retrieve PR diff: {str(exc)[:160]}"
+            }
+            cursor += 1
+            state["batch_queue_cursor"] = cursor
+            scanned_this_run += 1
+            save_state(state)
+            print(f"PR #{number}: not-reviewed; diff unavailable.", flush=True)
+            continue
+
+        findings = scan(diff)
+        high = [finding for finding in findings if finding.get("severity") == "high"]
+        medium = [finding for finding in findings if finding.get("severity") == "medium"]
+        if not high:
+            state.setdefault("reviewed", {})[key] = {
+                "verdict": "scan-only", "at": now(), "batch": label,
+                "medium_signal_count": len(medium)
+            }
+            stats = current_batch_stats(state, label)
+            if stats:
+                stats["scanned"] = int(stats.get("scanned", 0)) + 1
+                if medium:
+                    stats["medium_signal_prs"] = int(stats.get("medium_signal_prs", 0)) + 1
+            cursor += 1
+            state["batch_queue_cursor"] = cursor
+            scanned_this_run += 1
+            if scanned_this_run % 10 == 0:
+                save_state(state)
+            print(
+                f"PR #{number}: scan-only; {len(high)} high-severity indicators, "
+                f"{len(medium)} medium heuristic signals; no public comment.",
+                flush=True
+            )
+            continue
+
+        author = current.get("author") or {}
+        if isinstance(author, str):
+            author = {"login": author}
+        merged = bool(current.get("mergedAt"))
+        pr_state = str(current.get("state") or item.get("state") or "unknown").lower()
+        additions = sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines())
+        review = {
+            "source": SOURCE, "pr": number, "head_sha": sha,
+            "reviewer": SOURCE + "/automated",
+            "date": datetime.now(timezone.utc).date().isoformat(), "created_at": now(),
+            "scope": f"high-signal static pattern scan of added diff lines; no code executed; historical batch {label}",
+            "verdict": "do-not-merge",
+            "findings": [f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}" for x in high],
+            "detailed_findings": high, "read_by_human": False, "commented_on_github": False,
+            "review_submitted": False, "publication_status": "pending_github_comment",
+            "pr_title": current.get("title", ""), "pr_url": current.get("url", ""),
+            "author": author.get("login", ""), "base_branch": current.get("baseRefName", ""),
+            "head_branch": current.get("headRefName", ""), "additions": additions,
+            "patch_fingerprint": fingerprint(diff), "pr_state": pr_state, "merged": merged,
+            "historical_batch": label
+        }
+        (OUT / f"{number}.json").write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
+        QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [number]}, indent=2) + "\n", encoding="utf-8")
+        state["batch_waiting"] = {
+            "pr": number, "head_sha": sha, "cursor": cursor, "range": label
+        }
+        save_state(state)
+        print(f"PR #{number}: high-severity signal; queued for maintainer comment.", flush=True)
+        return True
+
+    state["batch_queue_cursor"] = cursor
+    save_state(state)
+    print(
+        f"Historical batch progress: cursor {cursor}/{len(tasks)}; "
+        f"processed {scanned_this_run} PRs this run.",
+        flush=True
+    )
+    if cursor >= len(tasks):
+        state.setdefault("historical_batch", {})["completed_at"] = now()
+        save_state(state)
+        print("All requested historical PR ranges have been scanned.", flush=True)
+    return True
+
+
 
 def scan(diff):
     out, seen, path, line_no = [], set(), "", 0
@@ -181,6 +500,8 @@ def main():
     ap.add_argument("--interval", type=int, default=900)
     ap.add_argument("--since-pr", type=int, default=0)
     ap.add_argument("--limit", type=int, default=25)
+    ap.add_argument("--seed-ranges", default="", help="Seed historical PR batches, e.g. 1000-3000,3001-6999,7000-9000")
+    ap.add_argument("--batch-limit", type=int, default=100, help="Maximum historical PR diffs to scan in one workflow run")
     ap.add_argument("--validate-only", action="store_true")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -203,6 +524,10 @@ def main():
     seed_historical_signatures(state)
 
     try:
+        if args.seed_ranges:
+            seed_historical_batches(state, args.seed_ranges)
+        if run_historical_batch(args, state):
+            return 0
         prs = get_prs(args.limit)
         dupes = duplicate_checks(prs)
         by_number = {p["number"]: p for p in prs}
