@@ -32,8 +32,10 @@ MEDIUM = [
  (r"\b(?:shell\s*=\s*True|--index-url|extra-index-url)\b", "Shell execution or package source override"),
  (r"\b(?:api[_-]?key|secret|access[_-]?token|password)\s*[:=]\s*['\"][^'\"]{12,}['\"]", "Possible hardcoded secret"),
 ]
-LOW = [(r"\b(?:shader|executable|dump|decrypt|game_data)\b", "Sensitive terminology"),
-       (r"\b(?:TODO|FIXME|HACK)\b", "Unfinished-work marker")]
+# Generic words common in graphics/recompilation code (for example "shader" or
+# "executable") are not security indicators by themselves. Keep low severity
+# limited to explicit unfinished-work markers; never flag terminology alone.
+LOW = [(r"\b(?:TODO|FIXME|HACK)\b", "Unfinished-work marker")]
 SAFE_PATH = re.compile(r"(^|/)(tests?|docs?|examples?|fixtures?)(/|$)|\.(md|rst|txt)$", re.I)
 SAFE_WORDS = re.compile(r"\b(mock|fixture|example|test case|not executed|placeholder)\b", re.I)
 
