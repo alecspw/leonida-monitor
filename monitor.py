@@ -361,11 +361,27 @@ def run_historical_batch(args, state):
             "historical_batch": label,
             "historical_scan_at": now()
         }
-        scan_only_dir = LEDGER_REVIEWS_DIR / "scan-only"
-        scan_only_dir.mkdir(parents=True, exist_ok=True)
-        (scan_only_dir / f"{number}.json").write_text(
-            json.dumps(record, indent=2) + "\n", encoding="utf-8"
-        )
+        existing_paths = []
+        for folder in ("clean", "notes", "do-not-merge", "scan-only", "not-reviewed", "in-progress"):
+            candidate = LEDGER_REVIEWS_DIR / folder / f"{number}.json"
+            if candidate.exists():
+                existing_paths.append(candidate)
+        flat_candidate = LEDGER_REVIEWS_DIR / f"{number}.json"
+        if flat_candidate.exists():
+            existing_paths.append(flat_candidate)
+
+        if not existing_paths:
+            scan_only_dir = LEDGER_REVIEWS_DIR / "scan-only"
+            scan_only_dir.mkdir(parents=True, exist_ok=True)
+            (scan_only_dir / f"{number}.json").write_text(
+                json.dumps(record, indent=2) + "\n", encoding="utf-8"
+            )
+        else:
+            # Never overwrite a prior human or already-published review.
+            print(
+                f"PR #{number}: preserving existing ledger record(s); detailed rerun remains in the Actions artifact.",
+                flush=True
+            )
 
         state.setdefault("reviewed", {})[key] = {
             "verdict": "scan-only",
