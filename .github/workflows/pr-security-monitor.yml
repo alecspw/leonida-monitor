@@ -161,8 +161,11 @@ jobs:
                   reviewed.pop(key, None)
                   reset.append(number)
                   continue
+              if review.get("verdict") == "scan-only":
+                  continue
               if review.get("source") == "leonida-security-monitor" and (
-                  review.get("commented_on_github") is not True or review.get("publication_status") != "published"
+                  review.get("verdict") in ("notes", "do-not-merge")
+                  and (review.get("commented_on_github") is not True or review.get("publication_status") != "published")
               ):
                   path.unlink()
                   reviewed.pop(key, None)
@@ -337,7 +340,8 @@ jobs:
               except Exception:
                   continue
               if data.get("source") == "leonida-security-monitor" and (
-                  data.get("commented_on_github") is not True or data.get("publication_status") != "published"
+                  data.get("verdict") in ("notes", "do-not-merge")
+                  and (data.get("commented_on_github") is not True or data.get("publication_status") != "published")
               ):
                   path.unlink()
                   removed.append(path.name)
