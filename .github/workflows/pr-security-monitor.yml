@@ -68,6 +68,12 @@ jobs:
                   "**Correction — false positive**\n\nPlease disregard the previous automated Dynamic code execution note. The match was Python's re.compile(...), which compiles a regular expression and does not execute dynamic code. The detector now avoids qualified method calls such as .compile(), and a regression test covers this case.",
                   "False positive: Python re.compile() was mistaken for dynamic code execution; the detector was narrowed and a regression test added."
               ),
+              (
+                  9403,
+                  "leonida-monitor-correction:9403:todo-identifier",
+                  "**Correction — false positive**\n\nPlease disregard the previous automated Unfinished-work marker note. The rule matched the ordinary variable name todo in make_game.py (todo = [], todo.append(entry), and write_index(todo)). This is normal source code, not an unfinished-work marker or a security issue. The ambiguous keyword-only TODO/FIXME/HACK rule has been removed from the monitor.",
+                  "False positive: ordinary todo variable was mistaken for an unfinished-work marker; ambiguous keyword-only matching was removed."
+              ),
           ]
 
           for number, marker, body, note in corrections:

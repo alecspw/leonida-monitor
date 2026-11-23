@@ -35,7 +35,9 @@ MEDIUM = [
 # Generic words common in graphics/recompilation code (for example "shader" or
 # "executable") are not security indicators by themselves. Keep low severity
 # limited to explicit unfinished-work markers; never flag terminology alone.
-LOW = [(r"\b(?:TODO|FIXME|HACK)\b", "Unfinished-work marker")]
+# TODO-like words and identifiers are too ambiguous in normal source code.
+# Keep this list empty; actionable findings must use higher-signal rules.
+LOW = []
 SAFE_PATH = re.compile(r"(^|/)(tests?|docs?|examples?|fixtures?)(/|$)|\.(md|rst|txt)$", re.I)
 SAFE_WORDS = re.compile(r"\b(mock|fixture|example|test case|not executed|placeholder)\b", re.I)
 

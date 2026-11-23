@@ -46,5 +46,10 @@ class MonitorTests(unittest.TestCase):
         findings = monitor.scan("diff --git a/tools/a.py b/tools/a.py\n+++ b/tools/a.py\n@@ -0,0 +1 @@\n+result = eval(user_input)")
         self.assertTrue(any(x["pattern"] == "Dynamic code execution" for x in findings))
 
+    def test_todo_variable_is_not_a_security_finding(self):
+        diff = "diff --git a/make_game.py b/make_game.py\n+++ b/make_game.py\n@@ -0,0 +1,4 @@\n+todo = []\n+todo.append(entry)\n+if not todo:\n+    write_index(todo)"
+        findings = monitor.scan(diff)
+        self.assertFalse(any(x["pattern"] == "Unfinished-work marker" for x in findings))
+
 if __name__ == "__main__":
     unittest.main()
