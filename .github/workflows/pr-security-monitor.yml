@@ -37,7 +37,7 @@ jobs:
           sudo apt update && sudo apt install -y gh
 
       - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+        run: echo "${{ secrets.GH_TOKEN }}" | gh auth login --with-token
 
       - name: Download monitor script
         run: |
@@ -45,7 +45,7 @@ jobs:
 
       - name: Run Security Monitor
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           python monitor.py --once --limit 100 --since-pr 8500
 
