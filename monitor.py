@@ -138,6 +138,38 @@ def fingerprint(diff):
     added=[norm(x[1:]) for x in diff.splitlines() if x.startswith("+") and not x.startswith("+++")]
     return hashlib.sha256("\n".join(x for x in added if x).encode()).hexdigest() if added else ""
 
+
+def load_state(path):
+    """Load monitor state and repair the historical literal-\\n suffix bug."""
+    if not path.exists():
+        return {"reviewed": {}, "pending": []}
+
+    raw = path.read_text(encoding="utf-8")
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError as original_error:
+        repaired = raw.rstrip()
+        removed = 0
+        while repaired.endswith("\\n"):
+            repaired = repaired[:-2]
+            removed += 1
+        if not removed:
+            raise ValueError(f"Invalid monitor state JSON in {path}: {original_error}") from original_error
+        try:
+            state = json.loads(repaired)
+        except json.JSONDecodeError as repair_error:
+            raise ValueError(f"Could not repair monitor state JSON in {path}: {repair_error}") from repair_error
+        path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        print(f"Recovered monitor state by removing {removed} literal \\\\n suffix(es).", flush=True)
+
+    if not isinstance(state, dict):
+        raise ValueError(f"Monitor state in {path} must be a JSON object.")
+    if not isinstance(state.get("reviewed"), dict):
+        state["reviewed"] = {}
+    if not isinstance(state.get("pending"), list):
+        state["pending"] = []
+    return state
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
@@ -161,7 +193,7 @@ def main():
                 return 1
         return 0
 
-    state = json.loads(STATE.read_text()) if STATE.exists() else {"reviewed": {}, "pending": []}
+    state = load_state(STATE)
     state.setdefault("reviewed", {})
     state.setdefault("pending", [])
     seed_historical_signatures(state)

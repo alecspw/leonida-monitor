@@ -50,7 +50,19 @@ jobs:
           reviews_dir = pathlib.Path("reviews")
           if not state_path.exists():
               raise SystemExit(0)
-          state = json.loads(state_path.read_text())
+          raw_state = state_path.read_text()
+          try:
+              state = json.loads(raw_state)
+          except json.JSONDecodeError:
+              repaired = raw_state.rstrip()
+              removed = 0
+              while repaired.endswith("\\n"):
+                  repaired = repaired[:-2]
+                  removed += 1
+              if not removed:
+                  raise
+              state = json.loads(repaired)
+              print(f"Recovered monitor_state.json by removing {removed} literal \\\\n suffix(es).")
           reviewed = state.setdefault("reviewed", {})
           reset = []
           for key in list(reviewed):
@@ -75,7 +87,7 @@ jobs:
                   path.unlink()
                   reviewed.pop(key, None)
                   reset.append(number)
-          state_path.write_text(json.dumps(state, indent=2) + "\\n")
+          state_path.write_text(json.dumps(state, indent=2) + "\n")
           print("Reset stale/unpublished automated review state:", sorted(set(reset)))
           PY
       - name: Run security monitor

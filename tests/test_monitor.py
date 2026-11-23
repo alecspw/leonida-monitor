@@ -24,5 +24,19 @@ class MonitorTests(unittest.TestCase):
         findings = monitor.learn_from_previous([second], state, 101)
         self.assertTrue(any(x["pattern"] == "Previously detected malicious-code signature" and x["related_pr"] == 100 for x in findings))
 
+
+    def test_load_state_repairs_literal_newline_suffix(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        original = {"reviewed": {"123:abc": {"verdict": "scan-only"}}, "pending": [{"pr": 124, "head_sha": "def"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor_state.json"
+            path.write_text(json.dumps(original) + r"\n", encoding="utf-8")
+            loaded = monitor.load_state(path)
+            self.assertEqual(loaded, original)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
 if __name__ == "__main__":
     unittest.main()
