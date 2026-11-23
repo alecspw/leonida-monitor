@@ -175,6 +175,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           MONITOR_STATE_FILE: ${{ github.workspace }}/leonida-reviews/monitor_state.json
           MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
+          MONITOR_LEDGER_REVIEWS_DIR: ${{ github.workspace }}/leonida-reviews/reviews
           MONITOR_BATCH_QUEUE_FILE: ${{ github.workspace }}/leonida-reviews/historical_pr_batches.json
           MONITOR_REVIEW_INDEX_FILE: ${{ github.workspace }}/leonida-reviews/docs/reviews.json
           MONITOR_BATCH_REPORT_FILE: ${{ github.workspace }}/historical_batch_findings.json
