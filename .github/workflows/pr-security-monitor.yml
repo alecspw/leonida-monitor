@@ -13,7 +13,10 @@ on:
         description: 'Correct two known false-positive review summaries on Leonida'
         required: false
         type: boolean
-        default: false
+        default: false      batch_ranges:
+        description: 'Historical PR ranges to seed, e.g. 1000-3000,3001-6999,7000-9000'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -141,6 +144,8 @@ jobs:
                   continue
               path = reviews_dir / f"{number}.json"
               if not path.exists():
+                  if reviewed[key].get("verdict") == "scan-only":
+                      continue
                   reviewed.pop(key, None)
                   reset.append(number)
                   continue
@@ -164,8 +169,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           MONITOR_STATE_FILE: ${{ github.workspace }}/leonida-reviews/monitor_state.json
           MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
+          MONITOR_BATCH_QUEUE_FILE: ${{ github.workspace }}/leonida-reviews/historical_pr_batches.json
+          MONITOR_REVIEW_INDEX_FILE: ${{ github.workspace }}/leonida-reviews/docs/reviews.json
+          MONITOR_BATCH_REPORT_FILE: ${{ github.workspace }}/historical_batch_findings.json
           SINCE_PR: ${{ inputs.since_pr || '8500' }}
-        run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
+          BATCH_RANGES: ${{ inputs.batch_ranges || '' }}
+        run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR" --seed-ranges "$BATCH_RANGES" --batch-limit 100
+      - name: Upload historical scan findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leonida-historical-scan-${{ github.run_id }}
+          path: ${{ github.workspace }}/historical_batch_findings.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Post a GitHub COMMENT for notes and do-not-merge findings
         working-directory: leonida-reviews
         env:
@@ -317,7 +334,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A reviews/ TABLE.md docs/reviews.json monitor_state.json
+          git add -A reviews/ TABLE.md docs/reviews.json monitor_state.json historical_pr_batches.json
           if git diff --cached --quiet; then
             echo "No published review changes"
           else
