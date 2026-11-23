@@ -107,7 +107,8 @@ def load_ledger_index():
 
 def is_currently_checked(number, head_sha, state, ledger_index):
     key = f"{number}:{head_sha}"
-    if key in state.get("reviewed", {}):
+    state_entry = state.get("reviewed", {}).get(key)
+    if state_entry and state_entry.get("verdict") != "not-reviewed":
         return "state"
     prior = ledger_index.get(number)
     if not prior:

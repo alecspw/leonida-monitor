@@ -66,5 +66,9 @@ class MonitorTests(unittest.TestCase):
         ledger[1234] = {"head": "abcdef12", "verdict": "in-progress"}
         self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "claimed")
 
+    def test_not_reviewed_state_entry_is_requeued(self):
+        state = {"reviewed": {"1234:abcdef123456": {"verdict": "not-reviewed"}}}
+        self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, {}), "")
+
 if __name__ == "__main__":
     unittest.main()
