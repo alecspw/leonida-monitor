@@ -13,6 +13,10 @@ BATCH_REPORT_FILE = Path(os.getenv("MONITOR_BATCH_REPORT_FILE", "historical_batc
 BATCH_RESULTS_DIR = Path(os.getenv("MONITOR_BATCH_RESULTS_DIR", "historical-scan-output"))
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 LEDGER_REVIEWS_DIR = Path(os.getenv("MONITOR_LEDGER_REVIEWS_DIR", "reviews"))
+SITE_STATUS_FILE = Path(os.getenv("MONITOR_SITE_STATUS_FILE", "docs/monitor-status.json"))
+SITE_STATUS_REPO = "Etoile-Bleu/leonida-reviews"
+SITE_STATUS_INTERVAL = 45
+_LAST_SITE_STATUS_PUBLISH = 0.0
 SOURCE = "leonida-security-monitor"
 HIGH = [
  (r"\b(?:VirtualAllocEx|WriteProcessMemory|CreateRemoteThread|NtUnmapViewOfSection)\b", "Process injection"),
@@ -230,6 +234,98 @@ def seed_historical_batches(state, value):
         )
     print(f"Total queued for fresh scans: {len(tasks)}.", flush=True)
     write_in_progress_window(tasks, 0, 100)
+    publish_site_status(state, tasks, 0, status="queued", force=True)
+
+
+def build_site_status(state, tasks, cursor, current_pr=None, status="running"):
+    batch = state.get("historical_batch", {})
+    ranges = batch.get("ranges", [])
+    completed = min(max(0, int(cursor)), len(tasks))
+    next_item = tasks[completed] if completed < len(tasks) else None
+    total = len(tasks)
+    scanned_totals = {
+        "scanned": sum(int(item.get("scanned", 0)) for item in ranges),
+        "high_alerts": sum(int(item.get("high_alerts", 0)) for item in ranges),
+        "medium_signal_prs": sum(int(item.get("medium_signal_prs", 0)) for item in ranges)
+    }
+    return {
+        "schema": 1,
+        "updated_at": now(),
+        "status": status,
+        "run_id": os.getenv("GITHUB_RUN_ID", ""),
+        "run_url": (
+            f"https://github.com/rideinstead/leonida-monitor/actions/runs/{os.getenv('GITHUB_RUN_ID')}"
+            if os.getenv("GITHUB_RUN_ID") else ""
+        ),
+        "current_pr": int(current_pr) if current_pr is not None else None,
+        "current_range": (
+            next_item.get("range") if next_item and current_pr is None
+            else next((item.get("range") for item in tasks if int(item.get("pr", -1)) == int(current_pr)), None)
+            if current_pr is not None else None
+        ),
+        "completed": completed,
+        "total": total,
+        "remaining": max(0, total - completed),
+        "in_progress_window": min(100, max(0, total - completed)),
+        "scanned": scanned_totals["scanned"],
+        "high_alert_prs": scanned_totals["high_alerts"],
+        "medium_signal_prs": scanned_totals["medium_signal_prs"],
+        "ranges": ranges
+    }
+
+
+def publish_site_status(state, tasks, cursor, current_pr=None, status="running", force=False):
+    global _LAST_SITE_STATUS_PUBLISH
+    payload = build_site_status(state, tasks, cursor, current_pr=current_pr, status=status)
+    SITE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    encoded_json = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    SITE_STATUS_FILE.write_text(encoded_json, encoding="utf-8")
+
+    now_mono = time.monotonic()
+    if not force and now_mono - _LAST_SITE_STATUS_PUBLISH < SITE_STATUS_INTERVAL:
+        return
+    if not os.getenv("GH_TOKEN"):
+        print("GH_TOKEN unavailable; live site status saved locally only.", flush=True)
+        return
+
+    endpoint = f"repos/{SITE_STATUS_REPO}/contents/docs/monitor-status.json"
+    current = subprocess.run(
+        ["gh", "api", endpoint + "?ref=main"],
+        capture_output=True, text=True, timeout=30
+    )
+    sha = None
+    if current.returncode == 0:
+        try:
+            sha = json.loads(current.stdout).get("sha")
+        except (ValueError, AttributeError):
+            print("Could not parse existing live status metadata; skipping site update.", flush=True)
+            return
+    elif "404" not in (current.stderr + current.stdout):
+        print("Could not fetch live status metadata; skipping site update: " +
+              (current.stderr or current.stdout).strip()[:240], flush=True)
+        return
+
+    request_body = {
+        "message": "chore: update live automated PR scan status",
+        "content": __import__("base64").b64encode(encoded_json.encode("utf-8")).decode("ascii"),
+        "branch": "main"
+    }
+    if sha:
+        request_body["sha"] = sha
+    updated = subprocess.run(
+        ["gh", "api", "--method", "PUT", endpoint, "--input", "-"],
+        input=json.dumps(request_body), capture_output=True, text=True, timeout=45
+    )
+    if updated.returncode:
+        print("Live status publication failed (scan will continue): " +
+              (updated.stderr or updated.stdout).strip()[:300], flush=True)
+        return
+    _LAST_SITE_STATUS_PUBLISH = time.monotonic()
+    print(
+        f"Live site status published: {status}; {payload['completed']}/{payload['total']} "
+        f"processed; current PR #{current_pr if current_pr is not None else '—'}.",
+        flush=True
+    )
 
 
 def current_batch_stats(state, label):
@@ -313,11 +409,13 @@ def run_historical_batch(args, state):
     ledger_index = load_ledger_index()
     scanned_this_run = 0
     run_findings = []
+    publish_site_status(state, tasks, cursor, status="running", force=True)
     while cursor < len(tasks) and scanned_this_run < args.batch_limit:
         item = tasks[cursor]
         number = int(item["pr"])
         label = str(item.get("range") or "historical")
         planned_sha = str(item.get("head_sha") or "")
+        publish_site_status(state, tasks, cursor, current_pr=number, status="running")
         print(f"Historical batch {label}: checking PR #{number} ({cursor + 1}/{len(tasks)}).", flush=True)
 
         try:
@@ -492,6 +590,11 @@ def run_historical_batch(args, state):
     state["batch_queue_cursor"] = cursor
     write_in_progress_window(tasks, cursor, args.batch_limit)
     save_state(state)
+    publish_site_status(
+        state, tasks, cursor, current_pr=None,
+        status="completed" if cursor >= len(tasks) else "waiting_for_next_batch",
+        force=True
+    )
     print(
         f"Historical batch progress: cursor {cursor}/{len(tasks)}; "
         f"processed {scanned_this_run} PRs this run; high-signal PRs {len(run_findings)}.",

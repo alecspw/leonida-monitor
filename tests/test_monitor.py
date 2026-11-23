@@ -72,5 +72,26 @@ class MonitorTests(unittest.TestCase):
         state = {"reviewed": {"1234:abcdef123456": {"verdict": "not-reviewed"}}}
         self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, {}), "")
 
+
+    def test_live_site_status_reports_current_and_remaining_prs(self):
+        state = {
+            "historical_batch": {
+                "ranges": [
+                    {"range": "1000-3000", "scanned": 3, "high_alerts": 1, "medium_signal_prs": 2}
+                ]
+            }
+        }
+        tasks = [
+            {"pr": 1000, "range": "1000-3000"},
+            {"pr": 1001, "range": "1000-3000"},
+            {"pr": 1002, "range": "1000-3000"}
+        ]
+        data = monitor.build_site_status(state, tasks, 1, current_pr=1001, status="running")
+        self.assertEqual(data["completed"], 1)
+        self.assertEqual(data["remaining"], 2)
+        self.assertEqual(data["current_pr"], 1001)
+        self.assertEqual(data["current_range"], "1000-3000")
+        self.assertEqual(data["scanned"], 3)
+
 if __name__ == "__main__":
     unittest.main()
