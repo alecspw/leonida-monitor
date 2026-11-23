@@ -2,7 +2,7 @@ name: Leonida PR Security Monitor
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       since_pr:
@@ -72,9 +72,24 @@ jobs:
               if not path.exists(): continue
               review = json.loads(path.read_text())
               if review.get("commented_on_github"): continue
-              body = ("⚠️ **Automated security monitor: " + review.get("verdict","notes").upper() + "**\n\n"
-                      + "\n".join("- " + x for x in review.get("findings",[])[:12])
-                      + "\n\n_Heuristic static analysis only; no code was executed. Human verification required._")
+              findings = review.get("detailed_findings", [])
+              verdict = review.get("verdict", "notes").upper()
+              if verdict == "DO-NOT-MERGE":
+                  intro = ("**Why this PR is marked DO-NOT-MERGE:** one or more high-severity indicators "
+                           "matched newly added code. These indicators are suspicious behaviors, not a claim "
+                           "that malware was executed or conclusively proven.")
+              else:
+                  intro = "**Why this PR was flagged:** the monitor found review-worthy security, duplication, or quality indicators."
+              details = []
+              for item in findings[:15]:
+                  location = (f"`{item.get('file')}`:{item.get('line')}" if item.get('file') else "PR metadata")
+                  related = f" (related PR: #{item['related_pr']})" if item.get("related_pr") else ""
+                  details.append("- **" + item.get("severity", "unknown").upper() + " — " + item.get("pattern", "Finding") + "** at " + location + related + "\n"
+                                 + "  Reason/evidence: " + item.get("match", "No excerpt available")[:350])
+              body = ("🚨 **Leonida security monitor — " + verdict + "**\n\n" + intro + "\n\n"
+                      + "**Findings and reasons**\n" + ("\n".join(details) if details else "- No detailed findings recorded.")
+                      + "\n\n**Recommended action:** do not merge until a maintainer has inspected each finding and confirmed it is safe or a false positive."
+                      + "\n\n_Automated heuristic static analysis only; contributor code was not executed. This is a review recommendation, not a malware verdict or an enforced merge block._")
               p = subprocess.run(["gh","api","--method","POST",f"repos/ItsNotRexed/Leonida/issues/{number}/comments","-f",f"body={body}"],capture_output=True,text=True)
               if p.returncode:
                   msg=(p.stderr or p.stdout).strip()

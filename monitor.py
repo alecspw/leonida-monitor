@@ -96,6 +96,44 @@ def duplicate_checks(prs):
         results[p["number"]]=found
     return results
 
+def signature_id(finding):
+    material = norm(finding.get("pattern", "")) + "|" + norm(finding.get("match", ""))
+    return hashlib.sha256(material.encode()).hexdigest() if material.strip("|") else ""
+
+def seed_historical_signatures(state):
+    history = state.setdefault("malicious_signatures", {})
+    for path in OUT.glob("*.json"):
+        if path.name == QUEUE.name: continue
+        try:
+            review = json.loads(path.read_text())
+            for finding in review.get("detailed_findings", []):
+                if finding.get("severity") != "high": continue
+                sig = signature_id(finding)
+                if sig and sig not in history:
+                    history[sig] = {"first_pr": review.get("pr"), "pattern": finding.get("pattern", "High-severity indicator"), "first_seen": review.get("created_at", now()), "occurrences": 1}
+        except (OSError, ValueError, TypeError):
+            continue
+
+def learn_from_previous(findings, state, pr_number):
+    history = state.setdefault("malicious_signatures", {})
+    additions = []
+    for finding in list(findings):
+        if finding.get("severity") != "high": continue
+        sig = signature_id(finding)
+        if not sig: continue
+        previous = history.get(sig)
+        if previous and previous.get("first_pr") != pr_number:
+            additions.append({"file": finding.get("file", ""), "line": finding.get("line", 0),
+                "pattern": "Previously detected malicious-code signature",
+                "match": f"Same high-severity indicator previously detected in PR #{previous.get('first_pr')}: {previous.get('pattern', finding.get('pattern', ''))}; recurring code signature",
+                "severity": "high", "related_pr": previous.get("first_pr")})
+            previous["occurrences"] = int(previous.get("occurrences", 1)) + 1
+            previous["last_seen"] = now()
+        else:
+            history.setdefault(sig, {"first_pr": pr_number, "pattern": finding.get("pattern", "High-severity indicator"), "first_seen": now(), "occurrences": 1})
+    findings.extend(additions)
+    return findings
+
 def fingerprint(diff):
     added=[norm(x[1:]) for x in diff.splitlines() if x.startswith("+") and not x.startswith("+++")]
     return hashlib.sha256("\n".join(x for x in added if x).encode()).hexdigest() if added else ""
@@ -116,6 +154,8 @@ def main():
             except Exception: bad+=1
         return int(bool(bad))
     state=json.loads(STATE.read_text()) if STATE.exists() else {"reviewed":{}}
+    state.setdefault("reviewed", {})
+    seed_historical_signatures(state)
     while True:
         queue=[]
         try:
@@ -127,6 +167,7 @@ def main():
                 print(f"Analyzing PR #{n}: {p.get('title','')}",flush=True)
                 diff=gh(["pr","diff",str(n),"--repo",REPO])
                 findings=scan(diff)+dupes.get(n,[])
+                findings=learn_from_previous(findings,state,n)
                 if len((p.get("title") or "").strip()) < 8 or (not (p.get("body") or "").strip() and not any(x.startswith("+") for x in diff.splitlines())):
                     findings.append({"file":"","line":0,"pattern":"Low-quality PR metadata","match":"Very short title or empty description with no substantive additions","severity":"low"})
                 high=[x for x in findings if x["severity"]=="high"]
