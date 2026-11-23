@@ -13,7 +13,8 @@ on:
         description: 'Correct two known false-positive review summaries on Leonida'
         required: false
         type: boolean
-        default: false      batch_ranges:
+        default: false
+      batch_ranges:
         description: 'Historical PR ranges to seed, e.g. 1000-3000,3001-6999,7000-9000'
         required: false
         type: string
@@ -80,9 +81,10 @@ jobs:
           ]
 
           for number, marker, body, note in corrections:
-              path = pathlib.Path("reviews") / f"{number}.json"
-              if not path.exists():
-                  raise SystemExit(f"Missing published review record: {path}")
+              matches = list(pathlib.Path("reviews").glob(f"*/{number}.json"))
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one verdict-folder record for PR #{number}, found {len(matches)}")
+              path = matches[0]
               record = json.loads(path.read_text(encoding="utf-8"))
               if record.get("source") != "leonida-security-monitor":
                   raise SystemExit(f"Refusing to edit non-monitor record for PR #{number}")
@@ -142,13 +144,17 @@ jobs:
                   number = int(key.split(":", 1)[0])
               except (ValueError, IndexError):
                   continue
-              path = reviews_dir / f"{number}.json"
-              if not path.exists():
+              matches = list(reviews_dir.glob(f"*/{number}.json"))
+              flat = reviews_dir / f"{number}.json"
+              if flat.exists():
+                  matches.append(flat)
+              if not matches:
                   if reviewed[key].get("verdict") == "scan-only":
                       continue
                   reviewed.pop(key, None)
                   reset.append(number)
                   continue
+              path = matches[0]
               try:
                   review = json.loads(path.read_text())
               except Exception:
@@ -172,6 +178,7 @@ jobs:
           MONITOR_BATCH_QUEUE_FILE: ${{ github.workspace }}/leonida-reviews/historical_pr_batches.json
           MONITOR_REVIEW_INDEX_FILE: ${{ github.workspace }}/leonida-reviews/docs/reviews.json
           MONITOR_BATCH_REPORT_FILE: ${{ github.workspace }}/historical_batch_findings.json
+          MONITOR_BATCH_RESULTS_DIR: ${{ github.workspace }}/historical-scan-output
           SINCE_PR: ${{ inputs.since_pr || '8500' }}
           BATCH_RANGES: ${{ inputs.batch_ranges || '' }}
         run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR" --seed-ranges "$BATCH_RANGES" --batch-limit 100
@@ -180,7 +187,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: leonida-historical-scan-${{ github.run_id }}
-          path: ${{ github.workspace }}/historical_batch_findings.json
+          path: |
+            ${{ github.workspace }}/historical_batch_findings.json
+            ${{ github.workspace }}/historical-scan-output/
           if-no-files-found: ignore
           retention-days: 30
       - name: Post a GitHub COMMENT for notes and do-not-merge findings
@@ -281,17 +290,26 @@ jobs:
           review["github_review_event"] = "COMMENT"
           review["publication_status"] = "published"
           review["public_disclosure_reviewed"] = True
-          dest = pathlib.Path(f"reviews/{number}.json")
-          dest.parent.mkdir(exist_ok=True)
-          # Do not overwrite a manual/human review file.
+          dest = pathlib.Path("reviews") / review["verdict"] / f"{number}.json"
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          existing_paths = list(pathlib.Path("reviews").glob(f"*/{number}.json"))
+          flat = pathlib.Path("reviews") / f"{number}.json"
+          if flat.exists():
+              existing_paths.append(flat)
+          for old_path in existing_paths:
+              if old_path == dest:
+                  continue
+              previous = json.loads(old_path.read_text())
+              if previous.get("source") != "leonida-security-monitor":
+                  print(f"PR #{number} already has a non-monitor review at {old_path}; preserving it.")
+                  raise SystemExit(0)
+              old_path.unlink()
           if dest.exists():
               previous = json.loads(dest.read_text())
               if previous.get("source") != "leonida-security-monitor":
                   print(f"PR #{number} already has a non-monitor public review; preserving it.")
-              else:
-                  dest.write_text(json.dumps(review, indent=2) + "\n")
-          else:
-              dest.write_text(json.dumps(review, indent=2) + "\n")
+                  raise SystemExit(0)
+          dest.write_text(json.dumps(review, indent=2) + "\n")
 
           state_path = pathlib.Path("monitor_state.json")
           state = json.loads(state_path.read_text()) if state_path.exists() else {"reviewed": {}, "pending": []}
@@ -312,7 +330,7 @@ jobs:
           python - <<'PY'
           import json, pathlib
           removed = []
-          for path in pathlib.Path("reviews").glob("*.json"):
+          for path in pathlib.Path("reviews").glob("*/*.json"):
               try:
                   data = json.loads(path.read_text())
               except Exception:
