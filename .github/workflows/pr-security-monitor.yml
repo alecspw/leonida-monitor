@@ -2,7 +2,7 @@ name: Leonida PR Security Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       since_pr:
@@ -21,92 +21,75 @@ concurrency:
 jobs:
   security-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout monitor repository
         uses: actions/checkout@v4
-
       - name: Checkout review repository
         uses: actions/checkout@v4
         with:
           repository: Etoile-Bleu/leonida-reviews
           ref: main
           path: leonida-reviews
-          token: ${{ secrets.GH_TOKEN }}
+          token: \${{ secrets.GH_TOKEN }}
           persist-credentials: true
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Run security monitor
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          MONITOR_STATE_FILE: ${{ github.workspace }}/leonida-reviews/monitor_state.json
-          MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
-          SINCE_PR: ${{ inputs.since_pr || '8500' }}
+          GH_TOKEN: \${{ secrets.GH_TOKEN }}
+          MONITOR_STATE_FILE: \${{ github.workspace }}/leonida-reviews/monitor_state.json
+          MONITOR_REVIEWS_DIR: \${{ github.workspace }}/reviews
+          SINCE_PR: \${{ inputs.since_pr || '8500' }}
         run: |
           python -m py_compile monitor.py
-          python monitor.py --once --limit 100 --since-pr "$SINCE_PR"
-
+          python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
       - name: Copy reviews and regenerate index
         run: |
           mkdir -p leonida-reviews/reviews
-          if compgen -G 'reviews/*.json' > /dev/null; then
-            cp -f reviews/*.json leonida-reviews/reviews/
-          fi
+          if compgen -G 'reviews/*.json' > /dev/null; then cp -f reviews/*.json leonida-reviews/reviews/; fi
           cd leonida-reviews
           python -I build_table.py
           python -I build_table.py --check
-
-      - name: Comment once on newly reviewed PRs
+      - name: Comment on newly flagged PRs (strictly paced)
         working-directory: leonida-reviews
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: \${{ secrets.GH_TOKEN }}
         run: |
           python - <<'PY'
-          import json
-          import pathlib
-          import subprocess
-
-          for path in sorted(pathlib.Path('reviews').glob('*.json')):
-              review = json.loads(path.read_text(encoding='utf-8'))
-              pr = review.get('pr')
-              if not pr or review.get('commented_on_github', False):
+          import json, pathlib, subprocess, time
+          q = pathlib.Path("reviews/comment_queue.json")
+          if not q.exists():
+              print("No new comment queue.")
+              raise SystemExit(0)
+          for number in json.loads(q.read_text()).get("prs", [])[:2]:
+              path = pathlib.Path(f"reviews/{number}.json")
+              if not path.exists(): continue
+              review = json.loads(path.read_text())
+              if review.get("commented_on_github"): continue
+              body = ("⚠️ **Automated security monitor: " + review.get("verdict","notes").upper() + "**\n\n"
+                      + "\n".join("- " + x for x in review.get("findings",[])[:12])
+                      + "\n\n_Heuristic static analysis only; no code was executed. Human verification required._")
+              p = subprocess.run(["gh","api","--method","POST",f"repos/ItsNotRexed/Leonida/issues/{number}/comments","-f",f"body={body}"],capture_output=True,text=True)
+              if p.returncode:
+                  msg=(p.stderr or p.stdout).strip()
+                  print(f"Comment failed for PR #{number}: {msg}")
+                  if "403" in msg or "429" in msg or "rate limit" in msg.lower():
+                      print("Rate limit detected; stopping comment queue."); break
                   continue
-              verdict = review.get('verdict', 'not-reviewed')
-              emoji = {'do-not-merge': '🚨', 'notes': '⚠️', 'clean': '✅'}.get(verdict, 'ℹ️')
-              findings = review.get('findings') or ['No findings.']
-              body = (
-                  f"{emoji} **Automated security review: {verdict.upper()}** "
-                  f"(commit `{str(review.get('head_sha', ''))[:8]}`)\n\n"
-                  + '\n'.join(f'- {item}' for item in findings)
-                  + '\n\n_Scope: static analysis of added diff lines only; no code was executed. '
-                    'Please review findings manually._'
-              )
-              result = subprocess.run(
-                  ['gh', 'api', '--method', 'POST',
-                   f'repos/ItsNotRexed/Leonida/issues/{pr}/comments',
-                   '-f', f'body={body}'], capture_output=True, text=True
-              )
-              if result.returncode == 0:
-                  review['commented_on_github'] = True
-                  path.write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
-                  print(f'Commented on PR #{pr}')
-              else:
-                  print(f'Comment failed for PR #{pr}: {result.stderr.strip()}')
+              review["commented_on_github"]=True
+              path.write_text(json.dumps(review,indent=2)+"\n")
+              print(f"Commented on PR #{number}")
+              time.sleep(3)
           PY
-
       - name: Commit reviews, state, and generated table
         working-directory: leonida-reviews
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reviews/ TABLE.md monitor_state.json
-          if git diff --cached --quiet; then
-            echo "No review repository changes to commit"
-          else
-            git commit -m "chore: update automated PR security reviews"
-            git push origin HEAD:main
+          if git diff --cached --quiet; then echo "No review repository changes to commit"
+          else git commit -m "chore: update automated PR security reviews" && git push origin HEAD:main
           fi
