@@ -368,12 +368,28 @@ jobs:
                 pushed=true
                 break
               fi
+
               echo "Push raced with another update; fetching and rebasing (attempt $attempt/4)."
               git fetch origin main
               if ! git rebase origin/main; then
-                git rebase --abort || true
-                echo "Rebase conflict; leaving this run failed so the next run can reconcile safely."
-                exit 1
+                conflicts="$(git diff --name-only --diff-filter=U | sort)"
+                unexpected="$(printf '%s\n' "$conflicts" | grep -Ev '^(TABLE.md|docs/reviews.json)$' || true)"
+                if [ -n "$unexpected" ] || [ -z "$conflicts" ]; then
+                  echo "Rebase encountered non-generated-file conflicts; refusing to overwrite them."
+                  git rebase --abort || true
+                  exit 1
+                fi
+                echo "Resolving only generated-table conflicts, then rebuilding them from merged review files."
+                git checkout --theirs -- TABLE.md docs/reviews.json
+                git add TABLE.md docs/reviews.json
+                GIT_EDITOR=true git rebase --continue
+              fi
+
+              python -I build_table.py
+              python -I build_table.py --check
+              git add TABLE.md docs/reviews.json
+              if ! git diff --cached --quiet; then
+                git commit -m "chore: regenerate review index after concurrent update"
               fi
             done
             if [ "$pushed" != true ]; then

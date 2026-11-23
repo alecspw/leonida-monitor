@@ -63,8 +63,10 @@ class MonitorTests(unittest.TestCase):
         ledger = {1234: {"head": "abcdef12", "verdict": "clean"}}
         self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "ledger")
         self.assertEqual(monitor.is_currently_checked(1234, "ffffffffffff", state, ledger), "")
-        ledger[1234] = {"head": "abcdef12", "verdict": "in-progress"}
+        ledger[1234] = {"head": "abcdef12", "verdict": "in-progress", "automated": False}
         self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "claimed")
+        ledger[1234]["automated"] = True
+        self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "")
 
     def test_not_reviewed_state_entry_is_requeued(self):
         state = {"reviewed": {"1234:abcdef123456": {"verdict": "not-reviewed"}}}
