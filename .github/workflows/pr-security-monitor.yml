@@ -37,19 +37,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Test monitor
+        run: |
+          python -m py_compile monitor.py
+          python -m unittest discover -s tests -v
       - name: Run security monitor
         env:
           GH_TOKEN: \${{ secrets.GH_TOKEN }}
           MONITOR_STATE_FILE: \${{ github.workspace }}/leonida-reviews/monitor_state.json
           MONITOR_REVIEWS_DIR: \${{ github.workspace }}/reviews
           SINCE_PR: \${{ inputs.since_pr || '8500' }}
-        run: |
-          python -m py_compile monitor.py
-          python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
+        run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
       - name: Copy reviews and regenerate index
         run: |
           mkdir -p leonida-reviews/reviews
           if compgen -G 'reviews/*.json' > /dev/null; then cp -f reviews/*.json leonida-reviews/reviews/; fi
+          if [ -f reviews/comment_queue.json ]; then mv reviews/comment_queue.json leonida-reviews/comment_queue.json; fi
           cd leonida-reviews
           python -I build_table.py
           python -I build_table.py --check
@@ -60,7 +63,7 @@ jobs:
         run: |
           python - <<'PY'
           import json, pathlib, subprocess, time
-          q = pathlib.Path("reviews/comment_queue.json")
+          q = pathlib.Path("comment_queue.json")
           if not q.exists():
               print("No new comment queue.")
               raise SystemExit(0)
