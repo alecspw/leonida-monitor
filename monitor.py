@@ -12,6 +12,7 @@ BATCH_QUEUE_FILE = Path(os.getenv("MONITOR_BATCH_QUEUE_FILE", "historical_pr_bat
 BATCH_REPORT_FILE = Path(os.getenv("MONITOR_BATCH_REPORT_FILE", "historical_batch_findings.json"))
 BATCH_RESULTS_DIR = Path(os.getenv("MONITOR_BATCH_RESULTS_DIR", "historical-scan-output"))
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
+LEDGER_REVIEWS_DIR = Path(os.getenv("MONITOR_LEDGER_REVIEWS_DIR", "reviews"))
 SOURCE = "leonida-security-monitor"
 HIGH = [
  (r"\b(?:VirtualAllocEx|WriteProcessMemory|CreateRemoteThread|NtUnmapViewOfSection)\b", "Process injection"),
@@ -360,7 +361,7 @@ def run_historical_batch(args, state):
             "historical_batch": label,
             "historical_scan_at": now()
         }
-        scan_only_dir = OUT / "scan-only"
+        scan_only_dir = LEDGER_REVIEWS_DIR / "scan-only"
         scan_only_dir.mkdir(parents=True, exist_ok=True)
         (scan_only_dir / f"{number}.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"
@@ -399,7 +400,7 @@ def run_historical_batch(args, state):
             "cursor_start": max(0, cursor - scanned_this_run),
             "cursor_end": cursor,
             "scanned_this_run": scanned_this_run,
-            "high_signal_prs": run_findings,
+            "flagged_prs": run_findings,
             "by_verdict": {
                 verdict: [item for item in run_findings if item.get("provisional_verdict") == verdict]
                 for verdict in ("do-not-merge", "notes", "clean")
