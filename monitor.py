@@ -23,7 +23,7 @@ HIGH = [
  (r"\bcheck_no_game_data\s*=\s*False|\bno_game_data\s*=\s*False", "Leonida safeguard disabled"),
 ]
 MEDIUM = [
- (r"\b(?:eval|exec|compile)\s*\(", "Dynamic code execution"),
+ (r"(?<![\\w.])(?:eval|exec|compile)\\s*\\(", "Dynamic code execution"),
  (r"\b(?:subprocess\.(?:run|Popen|call)|os\.system)\s*\(", "OS command execution"),
  (r"\b(?:requests\.(?:get|post)|urlopen|httpx\.(?:get|post))\s*\(", "Network request"),
  (r"\b(?:ctypes|cffi)\b|\bLoadLibrary(?:Ex)?\s*\(", "Native library loading"),

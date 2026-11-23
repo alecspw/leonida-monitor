@@ -38,5 +38,13 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(loaded, original)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
 
+    def test_regex_compile_is_not_dynamic_execution(self):
+        findings = monitor.scan("diff --git a/tools/a.py b/tools/a.py\n+++ b/tools/a.py\n@@ -0,0 +1 @@\n+pattern = re.compile(r'\\\\d+')")
+        self.assertFalse(any(x["pattern"] == "Dynamic code execution" for x in findings))
+
+    def test_builtin_eval_remains_detected(self):
+        findings = monitor.scan("diff --git a/tools/a.py b/tools/a.py\n+++ b/tools/a.py\n@@ -0,0 +1 @@\n+result = eval(user_input)")
+        self.assertTrue(any(x["pattern"] == "Dynamic code execution" for x in findings))
+
 if __name__ == "__main__":
     unittest.main()
