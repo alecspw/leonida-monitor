@@ -139,84 +139,135 @@ def fingerprint(diff):
     return hashlib.sha256("\n".join(x for x in added if x).encode()).hexdigest() if added else ""
 
 def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--once",action="store_true"); ap.add_argument("--daemon",action="store_true")
-    ap.add_argument("--interval",type=int,default=900); ap.add_argument("--since-pr",type=int,default=0)
-    ap.add_argument("--limit",type=int,default=25); ap.add_argument("--validate-only",action="store_true")
-    args=ap.parse_args()
-    OUT.mkdir(parents=True,exist_ok=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--daemon", action="store_true")
+    ap.add_argument("--interval", type=int, default=900)
+    ap.add_argument("--since-pr", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=25)
+    ap.add_argument("--validate-only", action="store_true")
+    args = ap.parse_args()
+    OUT.mkdir(parents=True, exist_ok=True)
+
     if args.validate_only:
-        bad=0
-        for f in OUT.glob("*.json"):
-            if f.name=="comment_queue.json": continue
+        for path in OUT.glob("*.json"):
+            if path.name == QUEUE.name:
+                continue
             try:
-                d=json.loads(f.read_text()); bad += d.get("source") != SOURCE or d.get("verdict") not in ("clean","notes","do-not-merge")
-            except Exception: bad+=1
-        return int(bool(bad))
-    state=json.loads(STATE.read_text()) if STATE.exists() else {"reviewed":{}}
+                data = json.loads(path.read_text())
+                if data.get("source") != SOURCE or data.get("verdict") not in ("notes", "do-not-merge"):
+                    return 1
+            except Exception:
+                return 1
+        return 0
+
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"reviewed": {}, "pending": []}
     state.setdefault("reviewed", {})
     state.setdefault("pending", [])
     seed_historical_signatures(state)
+
     while True:
         try:
             prs = get_prs(args.limit)
             dupes = duplicate_checks(prs)
-            by_number = {p['number']: p for p in prs}
-            pending = [x for x in state.get('pending', []) if isinstance(x, dict) and x.get('pr') and x.get('head_sha') and x['pr'] in by_number and by_number[x['pr']].get('headRefOid', '') == x['head_sha']]
-            keys = {(x['pr'], x['head_sha']) for x in pending}
-            for p in prs:
-                n, sha = p['number'], p.get('headRefOid', '')
-                if n > args.since_pr and (n, sha) not in keys and f'{n}:{sha}' not in state['reviewed']:
-                    pending.append({'pr': n, 'head_sha': sha})
-                    keys.add((n, sha))
-            batch = pending[:2]
-            print(f'Fetched {len(prs)} open PRs; pending {len(pending)}; processing {len(batch)}.', flush=True)
-            for item in batch:
-                p = by_number[item['pr']]
-                n, sha = p['number'], item['head_sha']
-                print(f'Analyzing PR #{n}: {p.get("title", "")}', flush=True)
-                diff = gh(['pr', 'diff', str(n), '--repo', REPO])
-                findings = learn_from_previous(scan(diff) + dupes.get(n, []), state, n)
-                if len((p.get('title') or '').strip()) < 8 or (not (p.get('body') or '').strip() and not any(x.startswith('+') for x in diff.splitlines())):
-                    findings.append({'file':'','line':0,'pattern':'Low-quality PR metadata','match':'Very short title or empty description with no substantive additions','severity':'low'})
-                high = [x for x in findings if x['severity'] == 'high']
-                verdict = 'do-not-merge' if high else ('notes' if findings else 'clean')
-                additions = sum(x.startswith('+') and not x.startswith('+++') for x in diff.splitlines())
-                review = {'source': SOURCE, 'pr': n, 'head_sha': sha, 'reviewer': SOURCE + '/automated',
-                    'date': datetime.now(timezone.utc).date().isoformat(), 'created_at': now(),
-                    'scope': 'heuristic static analysis of added diff lines and open-PR metadata; no code executed',
-                    'verdict': verdict, 'findings': [f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}" for x in findings],
-                    'detailed_findings': findings, 'read_by_human': False, 'commented_on_github': False,
-                    'review_submitted': False, 'publication_status': 'pending_github_review',
-                    'pr_title': p.get('title',''), 'pr_url': p.get('url',''), 'author': (p.get('author') or {}).get('login',''),
-                    'base_branch': p.get('baseRefName',''), 'head_branch': p.get('headRefName',''),
-                    'additions': additions, 'patch_fingerprint': fingerprint(diff)}
-                dest = OUT / f'{n}.json'
-                dest.write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
-                item.update({'verdict': verdict, 'analyzed_at': now(), 'findings_count': len(findings)})
-                if high:
-                    print(f'DO-NOT-MERGE recommendation — PR #{n}: {len(high)} high severity finding(s)', flush=True)
-                elif findings:
-                    print(f'Findings — PR #{n}: {len(findings)}', flush=True)
-                else:
-                    print(f'Scan only — PR #{n}: no configured indicators', flush=True)
-            state['pending'] = pending
-            actionable = [x['pr'] for x in pending if x.get('verdict') in ('notes','do-not-merge')]
-            QUEUE.write_text(json.dumps({'source': SOURCE, 'prs': actionable[:1]}, indent=2) + '\n')
-            state['last_check'] = now()
-            STATE.write_text(json.dumps(state, indent=2) + '\n')
-            print(f'Batch complete; remaining pending: {len(pending)}; next public review candidate: {actionable[:1]}', flush=True)
-        except RateLimited as e:
-            print(f'RATE LIMITED; preserving pending queue for next run: {e}', flush=True)
-            STATE.write_text(json.dumps(state, indent=2) + '\n')
-            return 0
-        except Exception as e:
-            print(f'ERROR: {e}', flush=True)
-            STATE.write_text(json.dumps(state, indent=2) + '\n')
-            return 1
-        if not args.daemon or args.once:
-            return 0
-        time.sleep(max(300, args.interval))
+            by_number = {p["number"]: p for p in prs}
 
-if __name__ == '__main__':
+            pending = []
+            for item in state["pending"]:
+                if not isinstance(item, dict) or not item.get("pr") or not item.get("head_sha"):
+                    continue
+                live = by_number.get(item["pr"])
+                if live and live.get("headRefOid", "") == item["head_sha"]:
+                    pending.append(item)
+            pending_keys = {(x["pr"], x["head_sha"]) for x in pending}
+
+            for p in sorted(prs, key=lambda x: x["number"]):
+                n, sha = p["number"], p.get("headRefOid", "")
+                key = f"{n}:{sha}"
+                if n > args.since_pr and (n, sha) not in pending_keys and key not in state["reviewed"]:
+                    pending.append({"pr": n, "head_sha": sha})
+                    pending_keys.add((n, sha))
+
+            # A single PR per invocation means retries never skip over an unposted finding.
+            if not pending:
+                QUEUE.write_text(json.dumps({"source": SOURCE, "prs": []}, indent=2) + "\n")
+                STATE.write_text(json.dumps(state, indent=2) + "\n")
+                print("No pending PRs.", flush=True)
+                return 0
+
+            item = pending[0]
+            p = by_number[item["pr"]]
+            n, sha = p["number"], item["head_sha"]
+            print(f"Analyzing PR #{n}: {p.get('title', '')}", flush=True)
+            diff = gh(["pr", "diff", str(n), "--repo", REPO])
+            findings = learn_from_previous(scan(diff) + dupes.get(n, []), state, n)
+            if len((p.get("title") or "").strip()) < 8 or (
+                not (p.get("body") or "").strip() and not any(x.startswith("+") for x in diff.splitlines())
+            ):
+                findings.append({
+                    "file": "", "line": 0, "pattern": "Low-quality PR metadata",
+                    "match": "Very short title or empty description with no substantive additions",
+                    "severity": "low"
+                })
+
+            high = [x for x in findings if x["severity"] == "high"]
+            verdict = "do-not-merge" if high else ("notes" if findings else "clean")
+            key = f"{n}:{sha}"
+
+            # A clean heuristic scan is not an approval and is not sent as an empty GitHub review.
+            if verdict == "clean":
+                state["reviewed"][key] = {"verdict": "scan-only", "at": now()}
+                state["pending"] = pending[1:]
+                STATE.write_text(json.dumps(state, indent=2) + "\n")
+                QUEUE.write_text(json.dumps({"source": SOURCE, "prs": []}, indent=2) + "\n")
+                print(f"PR #{n}: scan-only; no GitHub review will be posted.", flush=True)
+                return 0
+
+            additions = sum(x.startswith("+") and not x.startswith("+++") for x in diff.splitlines())
+            review = {
+                "source": SOURCE,
+                "pr": n,
+                "head_sha": sha,
+                "reviewer": SOURCE + "/automated",
+                "date": datetime.now(timezone.utc).date().isoformat(),
+                "created_at": now(),
+                "scope": "heuristic static analysis of added diff lines and open-PR metadata; no code executed",
+                "verdict": verdict,
+                "findings": [
+                    f"#{x['file']}:{x['line']} - {x['pattern']} - {x['match']}"
+                    for x in findings
+                ],
+                "detailed_findings": findings,
+                "read_by_human": False,
+                "commented_on_github": False,
+                "review_submitted": False,
+                "publication_status": "pending_github_comment",
+                "pr_title": p.get("title", ""),
+                "pr_url": p.get("url", ""),
+                "author": (p.get("author") or {}).get("login", ""),
+                "base_branch": p.get("baseRefName", ""),
+                "head_branch": p.get("headRefName", ""),
+                "additions": additions,
+                "patch_fingerprint": fingerprint(diff)
+            }
+
+            # This JSON exists only in the workflow workspace until the GitHub comment succeeds.
+            dest = OUT / f"{n}.json"
+            dest.write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
+            state["pending"] = pending
+            STATE.write_text(json.dumps(state, indent=2) + "\n")
+            QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [n]}, indent=2) + "\n")
+            print(f"PR #{n}: {verdict}; queued for a GitHub COMMENT. It will not be published until posted.", flush=True)
+            return 0
+
+        except RateLimited as exc:
+            print(f"RATE LIMITED: pending PR preserved for the next scheduled run: {exc}", flush=True)
+            STATE.write_text(json.dumps(state, indent=2) + "\n")
+            return 0
+        except Exception as exc:
+            print(f"ERROR: {exc}", flush=True)
+            STATE.write_text(json.dumps(state, indent=2) + "\n")
+            return 1
+
+if __name__ == "__main__":
     sys.exit(main())
