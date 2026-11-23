@@ -380,8 +380,19 @@ jobs:
                   exit 1
                 fi
                 echo "Resolving only generated-table conflicts, then rebuilding them from merged review files."
-                git checkout --theirs -- TABLE.md docs/reviews.json
-                git add TABLE.md docs/reviews.json
+                while IFS= read -r path; do
+                  case "$path" in
+                    TABLE.md|docs/reviews.json)
+                      git checkout --theirs -- "$path"
+                      git add "$path"
+                      ;;
+                    *)
+                      echo "Unexpected conflict path: $path"
+                      git rebase --abort || true
+                      exit 1
+                      ;;
+                  esac
+                done <<< "$conflicts"
                 GIT_EDITOR=true git rebase --continue
               fi
 
