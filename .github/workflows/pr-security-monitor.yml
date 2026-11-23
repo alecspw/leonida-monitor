@@ -183,6 +183,7 @@ jobs:
           MONITOR_REVIEW_INDEX_FILE: ${{ github.workspace }}/leonida-reviews/docs/reviews.json
           MONITOR_BATCH_REPORT_FILE: ${{ github.workspace }}/historical_batch_findings.json
           MONITOR_BATCH_RESULTS_DIR: ${{ github.workspace }}/historical-scan-output
+          MONITOR_SITE_STATUS_FILE: ${{ github.workspace }}/leonida-reviews/docs/monitor-status.json
           SINCE_PR: ${{ inputs.since_pr || '8500' }}
           BATCH_RANGES: ${{ inputs.batch_ranges || '' }}
         run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR" --seed-ranges "$BATCH_RANGES" --batch-limit 100
