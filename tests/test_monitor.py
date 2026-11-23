@@ -51,5 +51,20 @@ class MonitorTests(unittest.TestCase):
         findings = monitor.scan(diff)
         self.assertFalse(any(x["pattern"] == "Unfinished-work marker" for x in findings))
 
+
+    def test_parse_pr_ranges(self):
+        self.assertEqual(
+            monitor.parse_pr_ranges("1000-3000, 3001-6999,7000-9000"),
+            [(1000, 3000), (3001, 6999), (7000, 9000)]
+        )
+
+    def test_current_ledger_head_is_skipped_but_stale_head_is_requeued(self):
+        state = {"reviewed": {}}
+        ledger = {1234: {"head": "abcdef12", "verdict": "clean"}}
+        self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "ledger")
+        self.assertEqual(monitor.is_currently_checked(1234, "ffffffffffff", state, ledger), "")
+        ledger[1234] = {"head": "abcdef12", "verdict": "in-progress"}
+        self.assertEqual(monitor.is_currently_checked(1234, "abcdef123456", state, ledger), "claimed")
+
 if __name__ == "__main__":
     unittest.main()
