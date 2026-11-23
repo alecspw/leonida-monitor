@@ -31,7 +31,7 @@ jobs:
           repository: Etoile-Bleu/leonida-reviews
           ref: main
           path: leonida-reviews
-          token: \${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           persist-credentials: true
       - name: Setup Python
         uses: actions/setup-python@v5
