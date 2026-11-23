@@ -48,91 +48,158 @@ jobs:
           MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
           SINCE_PR: ${{ inputs.since_pr || '8500' }}
         run: python monitor.py --once --limit 25 --since-pr "$SINCE_PR"
-      - name: Copy generated review JSON into shared repository
-        run: |
-          mkdir -p leonida-reviews/reviews
-          if [ -d reviews ]; then find reviews -maxdepth 1 -type f -name '*.json' ! -name 'comment_queue.json' -exec cp -f {} leonida-reviews/reviews/ \; ; fi
-          if [ -f reviews/comment_queue.json ]; then mv reviews/comment_queue.json leonida-reviews/comment_queue.json; fi
-          cd leonida-reviews
-      - name: Submit GitHub PR reviews (approve / request changes / comment)
+      - name: Post a GitHub COMMENT for notes and do-not-merge findings
         working-directory: leonida-reviews
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          MONITOR_REVIEWS_DIR: ${{ github.workspace }}/reviews
         run: |
           python - <<'PY'
-          import json, pathlib, subprocess, time
-          q = pathlib.Path("comment_queue.json")
-          if not q.exists():
-              print("No new PR review queue.")
+          import json, os, pathlib, subprocess, sys, time
+
+          monitor_dir = pathlib.Path(os.environ["MONITOR_REVIEWS_DIR"])
+          queue_path = monitor_dir / "comment_queue.json"
+          if not queue_path.exists():
+              print("No PR comment queued.")
               raise SystemExit(0)
-          actor = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, check=True).stdout.strip().lower()
-          queued = json.loads(q.read_text()).get("prs", [])[:2]
-          for number in queued:
-              path = pathlib.Path(f"reviews/{number}.json")
-              if not path.exists(): continue
-              review = json.loads(path.read_text())
-              if review.get("review_submitted"): continue
-              verdict = review.get("verdict", "notes")
-              author = str(review.get("author", "")).lower()
-              if verdict == "clean":
-                  event = "APPROVE"
-                  intro = "Automated static review found no configured security indicators in the added diff lines. This is not a guarantee of safety."
-              elif verdict == "do-not-merge":
-                  event = "REQUEST_CHANGES"
-                  intro = "Changes requested: high-severity suspicious-code indicators were detected. Do not merge until a maintainer investigates and resolves or explicitly clears them."
-              else:
-                  event = "COMMENT"
-                  intro = "Review note: the monitor found items that need human inspection, but did not find a high-severity indicator requiring a changes request."
-              if author and author == actor and event in ("APPROVE", "REQUEST_CHANGES"):
-                  print(f"PR #{number}: authenticated reviewer is the PR author; GitHub will not accept an approval/request from the author. Posting COMMENT instead.")
-                  event = "COMMENT"
+          queued = json.loads(queue_path.read_text()).get("prs", [])
+          if not queued:
+              print("No finding-bearing PRs to comment on; clean scans are never approved.")
+              raise SystemExit(0)
+
+          number = int(queued[0])
+          source = monitor_dir / f"{number}.json"
+          if not source.exists():
+              raise SystemExit(f"Queued PR #{number} has no analysis JSON.")
+          review = json.loads(source.read_text())
+          if review.get("verdict") not in ("notes", "do-not-merge"):
+              raise SystemExit(f"Refusing to comment on unsupported verdict: {review.get('verdict')}")
+
+          # Avoid publishing another copy if a previous request succeeded but the runner lost its response.
+          marker = f"<!-- leonida-monitor:{number}:{review['head_sha']} -->"
+          actor_result = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True)
+          if actor_result.returncode:
+              raise SystemExit("Unable to identify the GitHub reviewer: " + actor_result.stderr.strip())
+          actor = actor_result.stdout.strip()
+
+          existing = subprocess.run(
+              ["gh", "api", "--paginate", f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews",
+               "--jq", f'.[] | select(.commit_id == "{review["head_sha"]}" and (.body // "" | contains("{marker}"))) | .id'],
+              capture_output=True, text=True)
+          if existing.returncode:
+              print("Could not check existing reviews; leaving PR queued for a later run: " + existing.stderr.strip())
+              raise SystemExit(0)
+
+          posted = bool(existing.stdout.strip())
+          if not posted:
               details = []
-              for item in review.get("detailed_findings", [])[:15]:
-                  location = f"`{item.get('file')}`:{item.get('line')}" if item.get("file") else "PR metadata"
-                  related = f" (related PR: #{item['related_pr']})" if item.get("related_pr") else ""
-                  details.append(f"- **{item.get('severity','unknown').upper()} — {item.get('pattern','Finding')}** at {location}{related}\n  Evidence: {item.get('match','No excerpt available')[:350]}")
-              body = ("**Leonida automated review — " + event + "**\n\n" + intro + "\n\n**Findings and reasons**\n"
-                      + ("\n".join(details) if details else "- No configured indicators matched the added diff lines.")
-                      + "\n\n_Static heuristic analysis only; contributor code was not executed. This review is advisory and does not replace maintainer review._")
-              payload = json.dumps({"event": event, "body": body})
-              p = subprocess.run(["gh", "api", "--method", "POST", f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews", "--input", "-"], input=payload, capture_output=True, text=True)
-              if p.returncode:
-                  msg = (p.stderr or p.stdout).strip()
-                  print(f"PR review submission failed for #{number}: {msg}")
-                  if "403" in msg or "429" in msg or "rate limit" in msg.lower():
-                      print("Rate limit or permission issue; stopping review queue."); break
-                  continue
-              review["review_submitted"] = True
-              review["commented_on_github"] = True
-              review["github_review_event"] = event
-              path.write_text(json.dumps(review, indent=2) + "\n")
-              print(f"Submitted {event} review for PR #{number}")
-              time.sleep(3)
-          state_path = pathlib.Path("monitor_state.json")
-          if state_path.exists():
-              state = json.loads(state_path.read_text())
-              reviewed = state.setdefault("reviewed", {})
-              for number in queued:
-                  review_path = pathlib.Path(f"reviews/{number}.json")
-                  if not review_path.exists():
+              for item in review.get("detailed_findings", [])[:12]:
+                  severity = str(item.get("severity", "unknown")).upper()
+                  label = str(item.get("pattern", "Finding"))
+                  file = str(item.get("file") or "PR metadata")
+                  line = item.get("line", 0)
+                  evidence = str(item.get("match", "No excerpt available"))[:180]
+                  # Never echo a suspected credential/token literal into a public comment.
+                  if "secret" in label.lower() or "credential" in label.lower() or "password" in label.lower() or "token" in label.lower():
+                      evidence = "[evidence redacted; inspect the added line privately]"
+                  related = f" (related PR #{item['related_pr']})" if item.get("related_pr") else ""
+                  details.append(f"- **{severity} — {label}** at `{file}:{line}`{related}\n  Evidence: `{evidence}`")
+
+              if review["verdict"] == "do-not-merge":
+                  intro = "The static monitor detected one or more high-severity suspicious-code indicators. Please investigate before merging; this is a heuristic alert, not a confirmed vulnerability."
+              else:
+                  intro = "The static monitor found items that need maintainer inspection. These are heuristic signals, not confirmed vulnerabilities."
+
+              body = (
+                  "**Leonida automated security-monitor note**\n\n"
+                  + intro + "\n\n**Findings**\n"
+                  + ("\n".join(details) if details else "- No detailed evidence was recorded.")
+                  + f"\n\n_Diff-only heuristic scan; contributor code was not executed. This is advisory and does not replace maintainer review._\n\n{marker}"
+              )
+              payload = json.dumps({"event": "COMMENT", "body": body})
+              submitted = False
+              for attempt, delay in enumerate((0, 60, 120), start=1):
+                  if delay:
+                      print(f"Secondary rate limit retry {attempt}/3; waiting {delay}s.", flush=True)
+                      time.sleep(delay)
+                  result = subprocess.run(
+                      ["gh", "api", "--method", "POST",
+                       f"repos/ItsNotRexed/Leonida/pulls/{number}/reviews", "--input", "-"],
+                      input=payload, capture_output=True, text=True)
+                  if result.returncode == 0:
+                      submitted = True
+                      posted = True
+                      break
+                  error = (result.stderr or result.stdout).strip()
+                  low = error.lower()
+                  if any(term in low for term in ("secondary rate limit", "abuse detection", "api rate limit exceeded", "http 429", "http 403")):
+                      print(f"GitHub rate-limited PR #{number} comment attempt {attempt}/3: {error}", flush=True)
                       continue
-                  review = json.loads(review_path.read_text())
-                  if not review.get("review_submitted"):
-                      reviewed.pop(f"{number}:{review.get('head_sha', '')}", None)
-                      review_path.unlink()
-              state_path.write_text(json.dumps(state, indent=2) + "\n")
+                  raise SystemExit(f"GitHub rejected PR #{number} comment: {error}")
+              if not submitted:
+                  print(f"PR #{number} remains pending; the next scheduled workflow will retry it.")
+                  raise SystemExit(0)
+
+          # Only now publish the record: GitHub confirmed the comment, or the marker proves it already exists.
+          review["review_submitted"] = True
+          review["commented_on_github"] = True
+          review["github_review_event"] = "COMMENT"
+          review["publication_status"] = "published"
+          review["public_disclosure_reviewed"] = True
+          dest = pathlib.Path(f"reviews/{number}.json")
+          dest.parent.mkdir(exist_ok=True)
+          # Do not overwrite a manual/human review file.
+          if dest.exists():
+              previous = json.loads(dest.read_text())
+              if previous.get("source") != "leonida-security-monitor":
+                  print(f"PR #{number} already has a non-monitor public review; preserving it.")
+              else:
+                  dest.write_text(json.dumps(review, indent=2) + "\n")
+          else:
+              dest.write_text(json.dumps(review, indent=2) + "\n")
+
+          state_path = pathlib.Path("monitor_state.json")
+          state = json.loads(state_path.read_text()) if state_path.exists() else {"reviewed": {}, "pending": []}
+          state.setdefault("reviewed", {})
+          state["pending"] = [
+              item for item in state.get("pending", [])
+              if not (int(item.get("pr", -1)) == number and item.get("head_sha") == review["head_sha"])
+          ]
+          state["reviewed"][f"{number}:{review['head_sha']}"] = {
+              "verdict": review["verdict"], "at": review.get("created_at"), "commented": True
+          }
+          state_path.write_text(json.dumps(state, indent=2) + "\n")
+          print(f"GitHub COMMENT confirmed for PR #{number}; review marked publishable.")
+          PY
+      - name: Remove legacy unpublished automated records
+        working-directory: leonida-reviews
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          removed = []
+          for path in pathlib.Path("reviews").glob("*.json"):
+              try:
+                  data = json.loads(path.read_text())
+              except Exception:
+                  continue
+              if data.get("source") == "leonida-security-monitor" and (
+                  data.get("commented_on_github") is not True or data.get("publication_status") != "published"
+              ):
+                  path.unlink()
+                  removed.append(path.name)
+          print("Removed unpublished legacy monitor records:", removed)
           PY
       - name: Generate and validate GitHub Pages review data
         working-directory: leonida-reviews
         run: |
           python -I build_table.py
           python -I build_table.py --check
-      - name: Commit reviews, state, and generated table
+      - name: Commit published reviews and generated Pages data
         working-directory: leonida-reviews
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reviews/ TABLE.md docs/reviews.json monitor_state.json
-          if git diff --cached --quiet; then echo "No review repository changes to commit"
-          else git commit -m "chore: update automated PR security reviews" && git push origin HEAD:main
+          git add -A reviews/ TABLE.md docs/reviews.json monitor_state.json
+          if git diff --cached --quiet; then echo "No published review changes"
+          else git commit -m "chore: publish confirmed automated PR comments" && git push origin HEAD:main
           fi
