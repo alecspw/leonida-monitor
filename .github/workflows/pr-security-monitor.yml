@@ -47,30 +47,82 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          python monitor.py --once --limit 100 --since-pr 8500
+          python monitor.py --once --limit 100 --since-pr ${{ github.event.inputs.since_pr || '8500' }}
 
-      - name: Upload review artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-security-reviews
-          path: reviews/
-          retention-days: 30
-
-      - name: Validate reviews
+      - name: Push reviews to leonida-reviews repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           cd leonida-reviews
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Copy new reviews from monitor output
+          cp -r ../reviews/* reviews/ 2>/dev/null || true
+          
+          # Check if there are new/changed reviews
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No new reviews to commit"
+          else
+            git add reviews/
+            git commit -m "chore: add security reviews from $(date -u +%Y-%m-%d)"
+            git push
+            echo "Pushed reviews to leonida-reviews"
+          fi
+          
+          # Rebuild TABLE.md
           python -I build_table.py --check
+          git add TABLE.md
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update TABLE.md $(date -u +%Y-%m-%d)"
+            git push
+            echo "Updated TABLE.md"
+          fi
 
-      - name: Upload TABLE.md
-        uses: actions/upload-artifact@v4
-        with:
-          name: review-table
-          path: leonida-reviews/TABLE.md
-          retention-days: 30
-
-      - name: Comment on suspicious PRs
-        if: always()
+      - name: Comment on analyzed PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          # This would be implemented to post comments on PRs with findings
-          # For now, just log
-          echo "Review complete. Check artifacts for details."
+          # Find PRs with findings and comment on them
+          for review_file in ../reviews/*.json; do
+            [ -f "$review_file" ] || continue
+            
+            pr_num=$(jq -r '.pr' "$review_file")
+            verdict=$(jq -r '.verdict' "$review_file")
+            findings=$(jq -r '.findings | join("\n")' "$review_file")
+            head_sha=$(jq -r '.head_sha' "$review_file")
+            
+            [ "$pr_num" = "null" ] && continue
+            
+            # Create comment body
+            if [ "$verdict" = "do-not-merge" ]; then
+              emoji="🚨"
+              status="**DO NOT MERGE**"
+            elif [ "$verdict" = "notes" ]; then
+              emoji="⚠️"
+              status="**NOTES**"
+            elif [ "$verdict" = "clean" ]; then
+              emoji="✅"
+              status="**CLEAN**"
+            else
+              emoji="ℹ️"
+              status="$verdict"
+            fi
+            
+            comment_body="${emoji} **Security Review: $status** (commit \`${head_sha:0:8}\`)
+
+<details>
+<summary>Findings</summary>
+
+$(echo "$findings" | sed 's/^/- /' || echo "None")
+
+</details>
+
+_Scope: static analysis, diff only, nothing executed_
+_Findings come from automated security review of this PR's diff; read by the account owner._"
+            
+            # Post comment
+            gh api repos/ItsNotRexed/Leonida/issues/$pr_num/comments \
+              -f body="$comment_body" \
+              -H "Accept: application/vnd.github+json" 2>/dev/null || echo "Failed to comment on PR #$pr_num"
+          done
