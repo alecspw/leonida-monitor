@@ -416,6 +416,7 @@ def run_historical_batch(args, state):
         print(f"Historical batch queue complete: {len(tasks)} queued PRs processed.", flush=True)
         return False
 
+    write_in_progress_window(tasks, cursor, args.batch_limit)
     ledger_index = load_ledger_index()
     scanned_this_run = 0
     run_findings = []

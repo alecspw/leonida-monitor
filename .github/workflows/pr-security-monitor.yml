@@ -374,7 +374,7 @@ jobs:
               git fetch origin main
               if ! git rebase origin/main; then
                 conflicts="$(git diff --name-only --diff-filter=U | sort)"
-                unexpected="$(printf '%s\n' "$conflicts" | grep -Ev '^(TABLE.md|docs/reviews.json|docs/monitor-status.json)
+                unexpected="$(printf '%s\n' "$conflicts" | grep -Ev '^(TABLE.md|docs/reviews.json|docs/monitor-status.json)$' || true)"
                 if [ -n "$unexpected" ] || [ -z "$conflicts" ]; then
                   echo "Rebase encountered non-generated-file conflicts; refusing to overwrite them."
                   git rebase --abort || true
