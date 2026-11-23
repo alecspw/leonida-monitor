@@ -92,6 +92,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(data["current_pr"], 1001)
         self.assertEqual(data["current_range"], "1000-3000")
         self.assertEqual(data["scanned"], 3)
+        self.assertEqual([item["pr"] for item in data["in_progress_prs"]], [1001, 1002])
 
 if __name__ == "__main__":
     unittest.main()

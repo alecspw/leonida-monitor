@@ -270,7 +270,17 @@ def build_site_status(state, tasks, cursor, current_pr=None, status="running"):
         "scanned": scanned_totals["scanned"],
         "high_alert_prs": scanned_totals["high_alerts"],
         "medium_signal_prs": scanned_totals["medium_signal_prs"],
-        "ranges": ranges
+        "ranges": ranges,
+        "in_progress_prs": [
+            {
+                "pr": int(item["pr"]),
+                "head": str(item.get("head_sha", ""))[:8],
+                "range": str(item.get("range", "")),
+                "title": str(item.get("title", "")),
+                "author": str(item.get("author", ""))
+            }
+            for item in tasks[completed:min(len(tasks), completed + 100)]
+        ]
     }
 
 
