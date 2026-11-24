@@ -69,8 +69,9 @@ def gh(args, timeout=600):
     raise RateLimited("Retry budget exhausted")
 
 def get_prs(limit):
-    # One complete paginated inventory; no historical range queue or batch windows.
-    prs = get_all_prs()
+    # Review only open PRs; closed/merged PRs cannot receive a normal review.
+    # Pagination is complete, so this is not a fixed first-page sample.
+    prs = [item for item in get_all_prs() if item.get("state") == "open"]
     return sorted(prs, key=lambda item: int(item.get("number", 0)))[:limit]
 
 def parse_pr_ranges(value):
