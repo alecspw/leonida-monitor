@@ -14,7 +14,7 @@ BATCH_RESULTS_DIR = Path(os.getenv("MONITOR_BATCH_RESULTS_DIR", "historical-scan
 LEDGER_INDEX_FILE = Path(os.getenv("MONITOR_REVIEW_INDEX_FILE", "docs/reviews.json"))
 LEDGER_REVIEWS_DIR = Path(os.getenv("MONITOR_LEDGER_REVIEWS_DIR", "reviews"))
 SITE_STATUS_FILE = Path(os.getenv("MONITOR_SITE_STATUS_FILE", "monitor-status.json"))
-SITE_STATUS_REPO = "Etoile-Bleu/leonida-reviews"
+SITE_STATUS_REPO = os.getenv("MONITOR_SITE_STATUS_REPO", "")
 SITE_STATUS_BRANCH = os.getenv("MONITOR_SITE_STATUS_BRANCH", "monitor-status")
 SITE_STATUS_INTERVAL = 45
 _LAST_SITE_STATUS_PUBLISH = 0.0
@@ -69,8 +69,9 @@ def gh(args, timeout=600):
     raise RateLimited("Retry budget exhausted")
 
 def get_prs(limit):
-    return json.loads(gh(["pr","list","--repo",REPO,"--state","open","--limit",str(limit),
-      "--json","number,title,body,author,headRefOid,baseRefName,headRefName,url"]))
+    # One complete paginated inventory; no historical range queue or batch windows.
+    prs = get_all_prs()
+    return sorted(prs, key=lambda item: int(item.get("number", 0)))[:limit]
 
 def parse_pr_ranges(value):
     ranges = []
@@ -299,6 +300,8 @@ def publish_site_status(state, tasks, cursor, current_pr=None, status="running",
         print("GH_TOKEN unavailable; live site status saved locally only.", flush=True)
         return
 
+    if not SITE_STATUS_REPO:
+        return
     endpoint = f"repos/{SITE_STATUS_REPO}/contents/monitor-status.json"
     current = subprocess.run(
         ["gh", "api", endpoint + f"?ref={SITE_STATUS_BRANCH}"],
