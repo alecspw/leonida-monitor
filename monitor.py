@@ -4,7 +4,7 @@ import argparse, difflib, hashlib, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = "ItsNotRexed/Leonida"
+REPO = os.getenv("TARGET_REPO", "ItsNotRexed/Leonida")
 STATE = Path(os.getenv("MONITOR_STATE_FILE", "monitor_state.json"))
 OUT = Path(os.getenv("MONITOR_REVIEWS_DIR", "reviews"))
 QUEUE = OUT / "comment_queue.json"
