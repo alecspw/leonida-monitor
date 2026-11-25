@@ -198,7 +198,7 @@ jobs:
             ${{ github.workspace }}/historical-scan-output/
           if-no-files-found: ignore
           retention-days: 30
-      - name: Post a GitHub COMMENT for notes and do-not-merge findings
+      - name: Post a GitHub COMMENT for every analyzed PR
         working-directory: leonida-reviews
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
