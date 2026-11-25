@@ -214,7 +214,7 @@ jobs:
               raise SystemExit(0)
           queued = json.loads(queue_path.read_text()).get("prs", [])
           if not queued:
-              print("No finding-bearing PRs to comment on; clean scans are never approved.")
+              print("No PR comment queued.")
               raise SystemExit(0)
 
           number = int(queued[0])
@@ -222,7 +222,7 @@ jobs:
           if not source.exists():
               raise SystemExit(f"Queued PR #{number} has no analysis JSON.")
           review = json.loads(source.read_text())
-          if review.get("verdict") not in ("notes", "do-not-merge"):
+          if review.get("verdict") not in ("clean", "notes", "do-not-merge"):
               raise SystemExit(f"Refusing to comment on unsupported verdict: {review.get('verdict')}")
 
           # Avoid publishing another copy if a previous request succeeded but the runner lost its response.
@@ -255,16 +255,22 @@ jobs:
                   related = f" (related PR #{item['related_pr']})" if item.get("related_pr") else ""
                   details.append(f"- **{severity} — {label}** at `{file}:{line}`{related}\n  Evidence: `{evidence}`")
 
-              if review["verdict"] == "do-not-merge":
-                  intro = "The static monitor detected one or more high-severity suspicious-code indicators. Please investigate before merging; this is a heuristic alert, not a confirmed vulnerability."
+              if review["verdict"] == "clean":
+                  intro = "No configured security heuristics were triggered in the added diff. This is a clean heuristic scan, not a guarantee that the change is safe."
+              elif review["verdict"] == "do-not-merge":
+                  intro = "The static monitor detected high-severity suspicious-code indicators. Please investigate before merging; this is a heuristic alert, not a confirmed vulnerability."
               else:
                   intro = "The static monitor found items that need maintainer inspection. These are heuristic signals, not confirmed vulnerabilities."
 
+              result_label = {"clean": "CLEAN", "notes": "REVIEW REQUIRED", "do-not-merge": "DO NOT MERGE"}[review["verdict"]]
+              findings_text = "\\n".join(details) if details else "- No findings detected by the configured rules."
               body = (
-                  "**Leonida automated security-monitor note**\n\n"
-                  + intro + "\n\n**Findings**\n"
-                  + ("\n".join(details) if details else "- No detailed evidence was recorded.")
-                  + f"\n\n_Diff-only heuristic scan; contributor code was not executed. This is advisory and does not replace maintainer review._\n\n{marker}"
+                  "## Automated security scan\\n\\n"
+                  + f"**Result:** {result_label}\\n"
+                  + f"**PR:** [#{number} — {review.get('pr_title', '')}]({review.get('pr_url', '')})\\n\\n"
+                  + intro + "\\n\\n### Findings\\n\\n"
+                  + findings_text
+                  + f"\\n\\n---\\n_Diff-only heuristic scan. Contributor code was not executed. Advisory only; does not replace maintainer review._\\n\\n{marker}"
               )
               payload = json.dumps({"event": "COMMENT", "body": body})
               submitted = False
