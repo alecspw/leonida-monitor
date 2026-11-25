@@ -263,14 +263,14 @@ jobs:
                   intro = "The static monitor found items that need maintainer inspection. These are heuristic signals, not confirmed vulnerabilities."
 
               result_label = {"clean": "CLEAN", "notes": "REVIEW REQUIRED", "do-not-merge": "DO NOT MERGE"}[review["verdict"]]
-              findings_text = "\\n".join(details) if details else "- No findings detected by the configured rules."
+              findings_text = "\n".join(details) if details else "- No findings detected by the configured rules."
               body = (
-                  "## Automated security scan\\n\\n"
-                  + f"**Result:** {result_label}\\n"
-                  + f"**PR:** [#{number} — {review.get('pr_title', '')}]({review.get('pr_url', '')})\\n\\n"
-                  + intro + "\\n\\n### Findings\\n\\n"
+                  "## Automated security scan\n\n"
+                  + f"**Result:** {result_label}\n"
+                  + f"**PR:** [#{number} — {review.get('pr_title', '')}]({review.get('pr_url', '')})\n\n"
+                  + intro + "\n\n### Findings\n\n"
                   + findings_text
-                  + f"\\n\\n---\\n_Diff-only heuristic scan. Contributor code was not executed. Advisory only; does not replace maintainer review._\\n\\n{marker}"
+                  + f"\n\n---\n_Diff-only heuristic scan. Contributor code was not executed. Advisory only; does not replace maintainer review._\n\n{marker}"
               )
               payload = json.dumps({"event": "COMMENT", "body": body})
               submitted = False
