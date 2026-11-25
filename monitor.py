@@ -815,12 +815,27 @@ def main():
             high = [x for x in findings if x["severity"] == "high"]
             verdict = "do-not-merge" if high else ("notes" if findings else "clean")
             if verdict == "clean":
-                state["reviewed"][key] = {"verdict": "scan-only", "at": now()}
-                pending.pop(0)
+                # Publish a concise clean-scan comment too. A clean result is still
+                # an analyzed PR and must be visible in the same review ledger.
+                additions = sum(x.startswith("+") and not x.startswith("+++") for x in diff.splitlines())
+                review = {
+                    "source": SOURCE, "pr": n, "head_sha": sha, "reviewer": SOURCE + "/automated",
+                    "date": datetime.now(timezone.utc).date().isoformat(), "created_at": now(),
+                    "scope": "heuristic static analysis of added diff lines and open-PR metadata; no code executed",
+                    "verdict": "clean", "findings": [], "detailed_findings": [],
+                    "read_by_human": False, "commented_on_github": False,
+                    "review_submitted": False, "publication_status": "pending_github_comment",
+                    "pr_title": p.get("title", ""), "pr_url": p.get("url", ""),
+                    "author": (p.get("author") or {}).get("login", ""),
+                    "base_branch": p.get("baseRefName", ""), "head_branch": p.get("headRefName", ""),
+                    "additions": additions, "patch_fingerprint": fingerprint(diff)
+                }
+                (OUT / f"{n}.json").write_text(json.dumps(review, indent=2) + "\n", encoding="utf-8")
                 state["pending"] = pending
                 STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-                print(f"PR #{n}: scan-only; no approval or public comment.", flush=True)
-                continue
+                QUEUE.write_text(json.dumps({"source": SOURCE, "prs": [n]}, indent=2) + "\n", encoding="utf-8")
+                print(f"PR #{n}: clean; queued for a GitHub COMMENT.", flush=True)
+                return 0
 
             additions = sum(x.startswith("+") and not x.startswith("+++") for x in diff.splitlines())
             review = {
